@@ -37,6 +37,20 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+type logEntry struct {
+	term  int
+	value int
+}
+
+type State int
+
+//state
+const (
+	Follower  State = itoa //0
+	Candidate              //1
+	Leader                 //2
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -50,18 +64,22 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	refreshTime int64
-	currentTerm int
-	voteFor     int
+	heartBeatTime int64
+	currentTerm   int
+	voteFor       int
+	log           []logEntry
+	state         State
 
-	commitIndex int
-	lastApplied int
+	commitIndex int //提交的最新的日志index
+	lastApplied int //应用到状态即的最新日志index
 
 	//leader专属字段
 	nextIndex  []int
 	matchIndex []int
 
-	votedForMe []int
+	//candidate相关字段
+	votedForMe []int //记录有哪些人给我投票了
+	voteTime   int64 //选举计时器
 }
 
 //添加日志/心跳包结构体
@@ -192,7 +210,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //发送请求投票
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("sendRequestVote reply:%v", reply)
+	DPrintf("RequestVote reply:%v", reply)
 	return ok
 }
 
@@ -219,7 +237,7 @@ func getMillisTime() int64 {
 //处理添加日志请求
 func (rf *Raft) AppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) {
 	//记录收到来自leader的添加日志请求的时间
-	rf.refreshTime = getMillisTime()
+	rf.heartBeatTime = getMillisTime()
 
 }
 
@@ -269,47 +287,96 @@ func (rf *Raft) Kill() {
 // for any long-running work.
 //
 
+func (rf *Raft) startCandidate() {
+	//变成竞争者状态
+	rf.state = Candidate
+
+	//将投票计数清0
+	for i := range rf.votedForMe {
+		rf.votedForMe[i] = 0
+	}
+
+	//为自己投票
+	rf.votedForMe[rf.me] = 1
+	rf.voteFor = rf.me
+
+	//选举计时器开始计时
+	rf.voteTime = getMillisTime()
+
+	//给所有其它raft节点发送投票请求
+	args := &RequestVoteArgs{}
+	args.term = rf.currentTerm
+	args.candidateId = rf.me
+	args.lastLogIndex = rf.commitIndex
+	if rf.commitIndex >= 0 {
+		args.lastLogTerm = rf.log[rf.commitIndex].term
+	}
+	reply := &RequestVoteReply{}
+	DPrintf("raft %v send request vote.", rf.me)
+	for i := range rf.peers {
+		if i != rf.me {
+			go func() {
+				rf.sendRequestVote(i, args, reply)
+			}()
+		}
+	}
+}
+
+func (rf *Raft) initParams() {
+	//收到心跳的时间初试为0
+	rf.heartBeatTime = 0
+
+	rf.currentTerm = 0
+	rf.voteFor = 0
+
+	//初始状态为Follower
+	rf.state = Follower
+
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+
+	//将投票计数清0
+	for i := range rf.votedForMe {
+		rf.votedForMe[i] = 0
+	}
+
+	rf.voteTime = 0
+
+	//这里从persister中回复数据
+
+}
+
+const ELECTION_TIMEOUT = 200 //ms
+const SLEEP_INTERVAL = 20    //ms
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.refreshTime = 0
 
-	const ELECTION_TIMEOUT = 200 //ms
-	const SLEEP_INTERVAL = 20    //ms
+	//初始化raft的参数
+	rf.initParams()
+
+	//初始化随机化种子
+	r := rand.New(rand.NewSource(99))
 
 	// Your initialization code here (2A, 2B, 2C).
 	//创建一个协程监听leader的心跳，如果超过一定时间没有收到leader的心跳，那么就发出投票请求
 
 	go func() {
-		r := rand.New(rand.NewSource(99))
-		DPrintf("raft %v start go func.", rf.me)
+
 		for {
 			time.Sleep(SLEEP_INTERVAL)
 			millisnow := getMillisTime()
 			//超过最长时限没有收到来自leader的心跳
-			if rf.refreshTime+ELECTION_TIMEOUT < millisnow {
+			if rf.heartBeatTime+ELECTION_TIMEOUT < millisnow {
 				//1, 随机退避一个时间
 				s := r.Intn(50)
 				time.Sleep(time.Duration(s) * time.Millisecond)
 
 				//2, 开始election,发送出sendRequestVote
-				args := &RequestVoteArgs{}
-				args.term = rf.currentTerm
-				args.candidateId = rf.me
-				args.lastLogIndex = rf.commitIndex
-				args.lastLogTerm = 0
-				reply := &RequestVoteReply{}
-				DPrintf("raft %v send request vote.", rf.me)
-
-				for i := range rf.peers {
-					if i != rf.me {
-						rf.sendRequestVote(i, args, reply)
-						DPrintf("recevie Request vote reply: %v", reply)
-					}
-				}
 
 				//rf.sendRequestVote()
 
