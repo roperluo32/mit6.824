@@ -78,8 +78,9 @@ type Raft struct {
 	matchIndex []int
 
 	//candidate相关字段
-	votedForMe []int //记录有哪些人给我投票了
-	voteTime   int64 //选举计时器
+	votedForMe  []int //记录有哪些人给我投票了
+	voteTime    int64 //选举计时器
+	maxWaitTime int   //最大的选举等待时间，每次开始选举时从150～300ms中随机选择一个时间
 }
 
 //添加日志/心跳包结构体
@@ -210,7 +211,41 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //发送请求投票
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("RequestVote reply:%v", reply)
+
+	if ok {
+		DPrintf("RequestVote reply:%v", reply)
+		//回复包的term比自己的要大，变成追随者
+		if reply.Term > rf.currentTerm {
+			rf.state = Follower
+			return ok
+		}
+
+		//回复包的term比自己小，丢弃该回复
+		if reply.Term < rf.currentTerm {
+			DPrintf("RequestVote reply's term:%v is too small(mine:%v), discard...", reply.Term, rf.currentTerm)
+			return false
+		}
+
+		//为自己投票了
+		if reply.VoteGranted == 1 {
+			rf.votedForMe[server] = 1
+		}
+
+		//计算目前的得票数是否超过了半数
+		count := 0
+		for i := range rf.votedForMe {
+			if rf.votedForMe[i] == 1 {
+				count += 1
+			}
+		}
+
+		//如果超过了半数，那么就变成领导人
+		if count > len(rf.peers)/2+1 {
+			rf.state = Leader
+		}
+
+	}
+
 	return ok
 }
 
@@ -296,12 +331,19 @@ func (rf *Raft) startCandidate() {
 		rf.votedForMe[i] = 0
 	}
 
+	//将term + 1
+	rf.currentTerm += 1
+
 	//为自己投票
 	rf.votedForMe[rf.me] = 1
 	rf.voteFor = rf.me
 
 	//选举计时器开始计时
 	rf.voteTime = getMillisTime()
+
+	//随机选择选举超时时间
+	r := rand.New(rand.NewSource(rf.voteTime))
+	rf.maxWaitTime = r.Intn(150) + 150
 
 	//给所有其它raft节点发送投票请求
 	args := &RequestVoteArgs{}
@@ -346,8 +388,8 @@ func (rf *Raft) initParams() {
 
 }
 
-const ELECTION_TIMEOUT = 200 //ms
-const SLEEP_INTERVAL = 20    //ms
+const HEARTBEAT_TIMEOUT = 200 //ms
+const SLEEP_INTERVAL = 20     //ms
 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
@@ -370,17 +412,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 			time.Sleep(SLEEP_INTERVAL)
 			millisnow := getMillisTime()
+
 			//超过最长时限没有收到来自leader的心跳
-			if rf.heartBeatTime+ELECTION_TIMEOUT < millisnow {
+			if rf.heartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
 				//1, 随机退避一个时间
 				s := r.Intn(50)
 				time.Sleep(time.Duration(s) * time.Millisecond)
 
-				//2, 开始election,发送出sendRequestVote
+				//2, 开始election
+				go rf.startCandidate()
+			}
 
-				//rf.sendRequestVote()
-
-				//3, 自己给自己投票
+			//如果是选举状态，并且等待超时
+			if rf.state == Candidate && rf.voteTime+int64(rf.maxWaitTime) < millisnow {
+				go rf.startCandidate()
 			}
 		}
 
