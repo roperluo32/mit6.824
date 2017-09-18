@@ -74,6 +74,7 @@ func (wk *Worker) Shutdown(_ *struct{}, res *ShutdownReply) error {
 func (wk *Worker) register(master string) {
 	args := new(RegisterArgs)
 	args.Worker = wk.name
+	//向master发送消息，告诉master本worker已经准备好
 	ok := call(master, "Master.Register", args, new(struct{}))
 	if ok == false {
 		fmt.Printf("Register: RPC %s register error\n", master)
@@ -93,9 +94,11 @@ func RunWorker(MasterAddress string, me string,
 	wk.Map = MapFunc
 	wk.Reduce = ReduceFunc
 	wk.nRPC = nRPC
+	//新建一个rpc server，应该是用来接收master的指令
 	rpcs := rpc.NewServer()
 	rpcs.Register(wk)
 	os.Remove(me) // only needed for "unix"
+	//监听unix套接字
 	l, e := net.Listen("unix", me)
 	if e != nil {
 		log.Fatal("RunWorker: worker ", me, " error: ", e)

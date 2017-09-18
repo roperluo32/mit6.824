@@ -22,6 +22,9 @@ func (mr *Master) startRPCServer() {
 	rpcs := rpc.NewServer()
 	rpcs.Register(mr)
 	os.Remove(mr.address) // only needed for "unix"
+
+	//监听创建的socket套接字
+	//  /var/tmp/824-${uid}/mr${pid}-master
 	l, e := net.Listen("unix", mr.address)
 	if e != nil {
 		log.Fatal("RegstrationServer", mr.address, " error: ", e)
@@ -38,6 +41,7 @@ func (mr *Master) startRPCServer() {
 				break loop
 			default:
 			}
+			//接受连接
 			conn, err := mr.l.Accept()
 			if err == nil {
 				go func() {

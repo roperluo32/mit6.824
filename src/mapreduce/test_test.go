@@ -23,6 +23,7 @@ const (
 // Check if we have N numbers in output file
 
 // Split in words
+//将输入的字符串以空格或者换行符为分隔符分解成单词，并保存到res数组中
 func MapFunc(file string, value string) (res []KeyValue) {
 	debug("Map %v\n", value)
 	words := strings.Fields(value)
@@ -34,6 +35,7 @@ func MapFunc(file string, value string) (res []KeyValue) {
 }
 
 // Just return key
+//什么都没干，返回了一个空字符串
 func ReduceFunc(key string, values []string) string {
 	for _, e := range values {
 		debug("Reduce %s %v\n", key, e)
@@ -96,6 +98,8 @@ func checkWorker(t *testing.T, l []int) {
 }
 
 // Make input file
+//生成num个文件，每个文件存放100000/num个数字
+//返回num个文件的文件名
 func makeInputs(num int) []string {
 	var names []string
 	var i = 0
@@ -106,6 +110,7 @@ func makeInputs(num int) []string {
 			log.Fatal("mkInput: ", err)
 		}
 		w := bufio.NewWriter(file)
+		//10万个数字分散到num个文件中
 		for i < (f+1)*(nNumber/num) {
 			fmt.Fprintf(w, "%d\n", i)
 			i++
@@ -119,6 +124,8 @@ func makeInputs(num int) []string {
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp. can't use current directory since
 // AFS doesn't support UNIX-domain sockets.
+//创建一个目录存放unix socket。 /var/tmp/824-${uid}
+//创建一个socket，名字叫/var/tmp/824-${uid}/mr${pid}-master/workeri
 func port(suffix string) string {
 	s := "/var/tmp/824-"
 	s += strconv.Itoa(os.Getuid()) + "/"
@@ -130,8 +137,12 @@ func port(suffix string) string {
 }
 
 func setup() *Master {
+	//创建nMap个文件
 	files := makeInputs(nMap)
+
+	//创建目录和unix socket
 	master := port("master")
+
 	mr := Distributed("test", files, nReduce, master)
 	return mr
 }
@@ -144,6 +155,7 @@ func cleanup(mr *Master) {
 }
 
 func TestSequentialSingle(t *testing.T) {
+	fmt.Printf("start TestSequentialSingle\n")
 	mr := Sequential("test", makeInputs(1), 1, MapFunc, ReduceFunc)
 	mr.Wait()
 	check(t, mr.files)
@@ -152,6 +164,7 @@ func TestSequentialSingle(t *testing.T) {
 }
 
 func TestSequentialMany(t *testing.T) {
+	fmt.Printf("start TestSequentialMany\n")
 	mr := Sequential("test", makeInputs(5), 3, MapFunc, ReduceFunc)
 	mr.Wait()
 	check(t, mr.files)
@@ -161,7 +174,13 @@ func TestSequentialMany(t *testing.T) {
 
 func TestBasic(t *testing.T) {
 	mr := setup()
+	return
 	for i := 0; i < 2; i++ {
+		//创建2个worker
+		//1，连接server，声明自己准备好了
+		//2, server分配任务给worker
+		//3, woker执行任务，并通知server任务完成
+		//4, server收到通知后判断是否还有任务没有完成，有的话就继续分配任务给worker
 		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)),
 			MapFunc, ReduceFunc, -1)
 	}

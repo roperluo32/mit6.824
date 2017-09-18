@@ -19,11 +19,11 @@ package raft
 
 import "sync"
 import "labrpc"
+import "time"
+import "math/rand"
 
 // import "bytes"
 // import "encoding/gob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,10 +50,38 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	refreshTime int64
+	currentTerm int
+	voteFor     int
+
+	commitIndex int
+	lastApplied int
+
+	//leader专属字段
+	nextIndex  []int
+	matchIndex []int
+
+	votedForMe []int
+}
+
+//添加日志/心跳包结构体
+type AppendEntries struct {
+	term         int
+	leaderId     int
+	prevLogIndex int
+	prevLogTerm  int
+	entries      []int //保存发给follower的日志条目，心跳包为0
+	leaderCommit int
+}
+
+type AppendEntriesReply struct {
+	term    int
+	success int
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
+//返回当前的term以及自己是否是leader信息
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
@@ -67,6 +95,7 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+//保存持久化信息，当raft宕机重启后使用
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -81,6 +110,7 @@ func (rf *Raft) persist() {
 //
 // restore previously persisted state.
 //
+//读取持久化信息
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
 	// Example:
@@ -93,30 +123,41 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
+//请求投票包
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term         int
+	candidateId  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 //
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
+//请求投票回复包
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted int
 }
 
 //
 // example RequestVote RPC handler.
 //
+//处理请求投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	DPrintf("Receive Request vote.raft %v ", rf.me)
+
+	reply.Term = 999
+	reply.VoteGranted = 1
+
 }
 
 //
@@ -148,12 +189,41 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
+//发送请求投票
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	DPrintf("sendRequestVote reply:%v", reply)
 	return ok
 }
 
+//发送添加日志请求
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
+//发送心跳
+func (rf *Raft) sendHeartBeat(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func getMillisTime() int64 {
+	now := time.Now()
+	nanos := now.UnixNano()
+	millis := nanos / 1000000
+
+	return millis
+}
+
+//处理添加日志请求
+func (rf *Raft) AppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) {
+	//记录收到来自leader的添加日志请求的时间
+	rf.refreshTime = getMillisTime()
+
+}
+
+//
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -173,7 +243,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -199,18 +268,59 @@ func (rf *Raft) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.refreshTime = 0
+
+	const ELECTION_TIMEOUT = 200 //ms
+	const SLEEP_INTERVAL = 20    //ms
 
 	// Your initialization code here (2A, 2B, 2C).
+	//创建一个协程监听leader的心跳，如果超过一定时间没有收到leader的心跳，那么就发出投票请求
+
+	go func() {
+		r := rand.New(rand.NewSource(99))
+		DPrintf("raft %v start go func.", rf.me)
+		for {
+			time.Sleep(SLEEP_INTERVAL)
+			millisnow := getMillisTime()
+			//超过最长时限没有收到来自leader的心跳
+			if rf.refreshTime+ELECTION_TIMEOUT < millisnow {
+				//1, 随机退避一个时间
+				s := r.Intn(50)
+				time.Sleep(time.Duration(s) * time.Millisecond)
+
+				//2, 开始election,发送出sendRequestVote
+				args := &RequestVoteArgs{}
+				args.term = rf.currentTerm
+				args.candidateId = rf.me
+				args.lastLogIndex = rf.commitIndex
+				args.lastLogTerm = 0
+				reply := &RequestVoteReply{}
+				DPrintf("raft %v send request vote.", rf.me)
+
+				for i := range rf.peers {
+					if i != rf.me {
+						rf.sendRequestVote(i, args, reply)
+						DPrintf("recevie Request vote reply: %v", reply)
+					}
+				}
+
+				//rf.sendRequestVote()
+
+				//3, 自己给自己投票
+			}
+		}
+
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }

@@ -27,21 +27,34 @@ func randstring(n int) string {
 }
 
 type config struct {
-	mu        sync.Mutex
-	t         *testing.T
-	net       *labrpc.Network
-	n         int
-	done      int32 // tell internal threads to die
-	rafts     []*Raft
-	applyErr  []string // from apply channel readers
-	connected []bool   // whether each server is on the net
-	saved     []*Persister
-	endnames  [][]string    // the port file names each sends to
-	logs      []map[int]int // copy of each server's committed entries
+	mu  sync.Mutex
+	t   *testing.T
+	net *labrpc.Network
+	//连接的server个数
+	n    int
+	done int32 // tell internal threads to die
+
+	//连接的raft实体
+	rafts    []*Raft
+	applyErr []string // from apply channel readers
+
+	//记录连接的server
+	connected []bool // whether each server is on the net
+
+	//记录n个raft的持久化信息
+	saved []*Persister
+
+	//记录各个raft相互的连接拓扑，也就是n×n个连接的连接名
+	endnames [][]string // the port file names each sends to
+
+	//每个raft的日志
+	logs []map[int]int // copy of each server's committed entries
 }
 
 var ncpu_once sync.Once
 
+//n：  代表启动n个raft实例
+//unreliable： 代表网络是否可靠，如果为true，那么就会模拟网络有延迟和90%的丢包
 func make_config(t *testing.T, n int, unreliable bool) *config {
 	ncpu_once.Do(func() {
 		if runtime.NumCPU() < 2 {
@@ -51,17 +64,28 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
+	//创建通信网络
 	cfg.net = labrpc.MakeNetwork()
+
+	//raft的实例个数
 	cfg.n = n
 	cfg.applyErr = make([]string, cfg.n)
+
+	//保存raft实例
 	cfg.rafts = make([]*Raft, cfg.n)
+
+	//保存网络连接
 	cfg.connected = make([]bool, cfg.n)
+
+	//持久信息
 	cfg.saved = make([]*Persister, cfg.n)
 	cfg.endnames = make([][]string, cfg.n)
 	cfg.logs = make([]map[int]int, cfg.n)
 
+	//网络是否可靠，不可靠的话就是90%的丢包率
 	cfg.setunreliable(unreliable)
 
+	//是否长延时
 	cfg.net.LongDelays(true)
 
 	// create a full set of Rafts.
@@ -117,18 +141,22 @@ func (cfg *config) crash1(i int) {
 // this server. since we cannot really kill it.
 //
 func (cfg *config) start1(i int) {
+	//先删除旧的raft
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.
+	// 随机生成本raft向其它raft发包的节点名字，后面会使用这个节点名字来通信
 	cfg.endnames[i] = make([]string, cfg.n)
 	for j := 0; j < cfg.n; j++ {
 		cfg.endnames[i][j] = randstring(20)
 	}
 
 	// a fresh set of ClientEnds.
+	//利用节点名字来生成ClientEnd，ClientEnd代表一个网络节点，可以向网络节点发起连接和发送请求等操作
 	ends := make([]*labrpc.ClientEnd, cfg.n)
 	for j := 0; j < cfg.n; j++ {
+		//每个节点都有对其他n个节点的一个连接
 		ends[j] = cfg.net.MakeEnd(cfg.endnames[i][j])
 		cfg.net.Connect(cfg.endnames[i][j], j)
 	}
@@ -139,6 +167,7 @@ func (cfg *config) start1(i int) {
 	// new instance's persisted state.
 	// but copy old persister's content so that we always
 	// pass Make() the last persisted state.
+	//如果raft i节点有持久化信息，那么使用持久化信息恢复
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	} else {
@@ -148,6 +177,8 @@ func (cfg *config) start1(i int) {
 	cfg.mu.Unlock()
 
 	// listen to messages from Raft indicating newly committed messages.
+
+	//创建channel，监听committed消息
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
@@ -183,13 +214,18 @@ func (cfg *config) start1(i int) {
 		}
 	}()
 
+	//创建raft节点
+	//ends：与其它节点的网络连接
 	rf := Make(ends, i, cfg.saved[i], applyCh)
 
 	cfg.mu.Lock()
 	cfg.rafts[i] = rf
 	cfg.mu.Unlock()
 
+	//创建一个service，将raft的方法暴露作为网络rpc的方法
 	svc := labrpc.MakeService(rf)
+
+	//以raft生成的service服务为基础，生成一个server，server代表网络框架
 	srv := labrpc.MakeServer()
 	srv.AddService(svc)
 	cfg.net.AddServer(i, srv)
@@ -264,13 +300,18 @@ func (cfg *config) setlongreordering(longrel bool) {
 
 // check that there's exactly one leader.
 // try a few times in case re-elections are needed.
+//检查最大的term对应的leader只有一个
 func (cfg *config) checkOneLeader() int {
+	//做10次检查
 	for iters := 0; iters < 10; iters++ {
+		//等待0.5s
 		time.Sleep(500 * time.Millisecond)
 		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
+				//获取raft的状态，返回当前的term以及自己是否是leader
 				if t, leader := cfg.rafts[i].GetState(); leader {
+					//记录每个term下的leader数量
 					leaders[t] = append(leaders[t], i)
 				}
 			}
@@ -278,15 +319,18 @@ func (cfg *config) checkOneLeader() int {
 
 		lastTermWithLeader := -1
 		for t, leaders := range leaders {
+			//如果某个term下的leader数量大于1，说明非法
 			if len(leaders) > 1 {
 				cfg.t.Fatalf("term %d has %d (>1) leaders", t, len(leaders))
 			}
+			//记录最大的term
 			if t > lastTermWithLeader {
 				lastTermWithLeader = t
 			}
 		}
 
 		if len(leaders) != 0 {
+			//返回最大的term对应的leader
 			return leaders[lastTermWithLeader][0]
 		}
 	}
@@ -295,6 +339,7 @@ func (cfg *config) checkOneLeader() int {
 }
 
 // check that everyone agrees on the term.
+//检查所有的raft实例都遵从同一个term
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {

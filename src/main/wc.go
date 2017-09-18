@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"mapreduce"
 	"os"
+	"strconv"
+	"strings"
+	"unicode"
 )
 
 //
@@ -15,6 +18,26 @@ import (
 //
 func mapF(filename string, contents string) []mapreduce.KeyValue {
 	// TODO: you have to write this function
+	//words := strings.Fields(contents)
+	f := func(c rune) bool {
+		return !unicode.IsLetter(c) && !unicode.IsNumber(c)
+	}
+	words := strings.FieldsFunc(contents, f)
+	//fmt.Printf("words:%v\n", words)
+
+	tmpresults := make(map[string]int)
+	for _, w := range words {
+		tmpresults[w] = tmpresults[w] + 1
+	}
+
+	var res []mapreduce.KeyValue
+	for key, count := range tmpresults {
+		kv := mapreduce.KeyValue{key, fmt.Sprintf("%d", count)}
+		res = append(res, kv)
+	}
+
+	//fmt.Printf("mapF res:%v\n", res)
+	return res
 }
 
 //
@@ -24,6 +47,19 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 //
 func reduceF(key string, values []string) string {
 	// TODO: you also have to write this function
+	count := 0
+	//fmt.Printf("\nreduceF input values:\n%v\n", values)
+
+	for _, value := range values {
+		s, err := strconv.Atoi(value)
+		if err != nil {
+			fmt.Printf("reduceF: %T, %v", s, s)
+			continue
+		}
+		count += s
+	}
+	//fmt.Printf("value:%v\n", count)
+	return fmt.Sprintf("%d", count)
 }
 
 // Can be run in 3 ways:

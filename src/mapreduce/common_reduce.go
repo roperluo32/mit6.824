@@ -1,5 +1,11 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"log"
+	"os"
+)
+
 // doReduce manages one reduce task: it reads the intermediate
 // key/value pairs (produced by the map phase) for this task, sorts the
 // intermediate key/value pairs by key, calls the user-defined reduce function
@@ -43,4 +49,47 @@ func doReduce(
 	// }
 	// file.Close()
 	//
+
+	//1.创建reduce输出文件
+	outf, err := os.Create(outFile)
+	if err != nil {
+		log.Fatal("doMap create file fail.", err)
+		return
+	}
+	enc := json.NewEncoder(outf)
+
+	defer func() {
+		outf.Close()
+	}()
+
+	tmpresults := make(map[string][]string)
+	//2，遍历每个map的输出文件，如果文件存在，将key和value统计到一个map中
+	for i := 0; i < nMap; i++ {
+		filename := reduceName(jobName, i, reduceTaskNumber)
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatal("reduce every map output file fail.", err)
+			continue
+		}
+		//reduce以json格式输出结果
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			err = dec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			tmpresults[kv.Key] = append(tmpresults[kv.Key], kv.Value)
+
+		}
+
+		file.Close()
+	}
+
+	//针对每个key调用reduceF来生成结果
+	for key, value := range tmpresults {
+		enc.Encode(KeyValue{key, reduceF(key, value)})
+	}
+
+	return
 }
