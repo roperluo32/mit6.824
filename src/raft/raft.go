@@ -149,10 +149,10 @@ func (rf *Raft) readPersist(data []byte) {
 //请求投票包
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int
-	candidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -174,8 +174,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	DPrintf("Receive Request vote.raft %v ", rf.me)
 
-	reply.Term = 999
-	reply.VoteGranted = 1
+	//请求投票的term大于自己的term，无条件给它投票，自己转为追随者
+	if args.Term > rf.currentTerm {
+		rf.state == Follower
+		rf.currentTerm = args.Term
+		reply.VoteGranted = 1
+		rf.voteFor = args.CandidateId
+	}
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = 0
+	}
+
+	if args.Term == rf.currentTerm {
+		if rf
+	}
+
+
+	reply.Term = rf.currentTerm
+
 
 }
 
@@ -347,11 +365,11 @@ func (rf *Raft) startCandidate() {
 
 	//给所有其它raft节点发送投票请求
 	args := &RequestVoteArgs{}
-	args.term = rf.currentTerm
-	args.candidateId = rf.me
-	args.lastLogIndex = rf.commitIndex
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = rf.commitIndex
 	if rf.commitIndex >= 0 {
-		args.lastLogTerm = rf.log[rf.commitIndex].term
+		args.LastLogTerm = rf.log[rf.commitIndex].term
 	}
 	reply := &RequestVoteReply{}
 	DPrintf("raft %v send request vote.", rf.me)
@@ -385,7 +403,8 @@ func (rf *Raft) initParams() {
 	rf.voteTime = 0
 
 	//这里从persister中回复数据
-
+	// initialize from state persisted before a crash
+	rf.readPersist(rf.persister.ReadRaftState())
 }
 
 const HEARTBEAT_TIMEOUT = 200 //ms
@@ -413,26 +432,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			time.Sleep(SLEEP_INTERVAL)
 			millisnow := getMillisTime()
 
-			//超过最长时限没有收到来自leader的心跳
-			if rf.heartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
-				//1, 随机退避一个时间
-				s := r.Intn(50)
-				time.Sleep(time.Duration(s) * time.Millisecond)
-
-				//2, 开始election
-				go rf.startCandidate()
+			//如果自己是leader
+			if rf.state == Leader {
+				//定时发送心跳
 			}
 
-			//如果是选举状态，并且等待超时
-			if rf.state == Candidate && rf.voteTime+int64(rf.maxWaitTime) < millisnow {
-				go rf.startCandidate()
+			//如果是follower
+			if rf.state == Follower {
+				//超过最长时限没有收到来自leader的心跳
+				if rf.heartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
+					//1, 随机退避一个时间
+					s := r.Intn(50)
+					time.Sleep(time.Duration(s) * time.Millisecond)
+
+					//2, 开始election
+					go rf.startCandidate()
+				}
+			}
+
+			//如果是Candidate
+			if rf.state == Candidate {
+				//检查是否选举超时
+				if rf.voteTime+int64(rf.maxWaitTime) < millisnow {
+					go rf.startCandidate()
+				}
 			}
 		}
 
 	}()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
