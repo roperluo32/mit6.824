@@ -64,7 +64,9 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	recvHeartBeatTime int64 //上一次收到心跳的时间
+	recvHeartBeatTime int64      //上一次收到心跳的时间
+	heartBeatTimeout  int        //心跳超时，每次都重新随机生成（150～300ms）
+	randGen           *rand.Rand //随机数生成器
 	currentTerm       int
 	voteFor           int
 	log               []logEntry
@@ -74,8 +76,9 @@ type Raft struct {
 	lastApplied int //应用到状态即的最新日志index
 
 	//leader专属字段
-	nextIndex  []int
-	matchIndex []int
+	nextIndex   []int
+	matchIndex  []int
+	sendLogTime int64 //发送日志的时间
 
 	//candidate相关字段
 	votedForMe      []int //记录有哪些人给我投票了
@@ -85,17 +88,17 @@ type Raft struct {
 
 //添加日志/心跳包结构体
 type AppendEntries struct {
-	term         int
-	leaderId     int
-	prevLogIndex int
-	prevLogTerm  int
-	entries      []int //保存发给follower的日志条目，心跳包为0
-	leaderCommit int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []logEntry //保存发给follower的日志条目，心跳包为0
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	term    int
-	success int
+	Term    int
+	Success int
 }
 
 // return currentTerm and whether this server
@@ -174,29 +177,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	DPrintf("Raft %v receive request vote from raft %v", rf.me, args.CandidateId)
 
+	//更新时间戳
+	rf.recvHeartBeatTime = getMillisTime()
+
 	//请求投票的term大于自己的term，无条件给它投票，自己转为追随者
 	if args.Term > rf.currentTerm {
 		rf.state = Follower
 		rf.currentTerm = args.Term
 		reply.VoteGranted = 1
 		rf.voteFor = args.CandidateId
-	}
 
-	//投票的term小于自己的，不给它投票
-	if args.Term < rf.currentTerm {
+		DPrintf("me:%v, src:%v, vote for him", rf.me, args.CandidateId)
+	} else if args.Term < rf.currentTerm {
+		//投票的term小于自己的，不给它投票
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
-	}
 
-	//args.term等于自己的
-	if args.Term == rf.currentTerm {
+		DPrintf("me:%v, src:%v, his term:%v lower than mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+	} else if args.Term == rf.currentTerm {
 		//已经给别人投票了
 		if rf.voteFor != 0 {
 			reply.VoteGranted = 0
+			DPrintf("me:%v, src:%v, I have voted for %v", rf.me, args.CandidateId, rf.voteFor)
 		} else {
 			//args的日志索引小于我的，不投票
 			if args.LastLogIndex < rf.commitIndex {
 				reply.VoteGranted = 0
+				DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.commitIndex)
 			} else {
 				//给请求者投票
 				reply.VoteGranted = 1
@@ -243,7 +250,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
 	if ok {
-		DPrintf("RequestVote reply:%v", reply)
+		DPrintf("me:%v, src:%v, receive vote reply:%v", rf.me, server, reply)
 		//回复包的term比自己的要大，变成追随者
 		if reply.Term > rf.currentTerm {
 			rf.state = Follower
@@ -269,9 +276,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			}
 		}
 
+		DPrintf("me:%v, Now I have get %v votes.", rf.me, count)
+
 		//如果超过了半数，那么就变成领导人
-		if count > len(rf.peers)/2+1 {
+		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
+			DPrintf("me:%v,I'll be LEADER ~~~", rf.me)
 		}
 
 	}
@@ -300,10 +310,18 @@ func getMillisTime() int64 {
 }
 
 //处理添加日志请求
-func (rf *Raft) AppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	//记录收到来自leader的添加日志请求的时间
 	rf.recvHeartBeatTime = getMillisTime()
 
+	DPrintf("me:%v, src:%v, Receive append log request.", rf.me, args.LeaderId)
+	reply.Success = 1
+	if args.Term < rf.currentTerm {
+		DPrintf("me:%v, src:%v, his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+		reply.Success = 0
+	}
+
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -353,6 +371,7 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) startCandidate() {
+	//DPrintf("raft %v start to candidate.", rf.me)
 	//变成竞争者状态
 	rf.state = Candidate
 
@@ -372,8 +391,7 @@ func (rf *Raft) startCandidate() {
 	rf.voteTime = getMillisTime()
 
 	//随机选择选举超时时间
-	r := rand.New(rand.NewSource(rf.voteTime))
-	rf.maxVoteWaitTime = r.Intn(150) + 150
+	rf.maxVoteWaitTime = rf.getRandWaitTime()
 
 	//给所有其它raft节点发送投票请求
 	args := &RequestVoteArgs{}
@@ -384,7 +402,7 @@ func (rf *Raft) startCandidate() {
 		args.LastLogTerm = rf.log[rf.commitIndex].term
 	}
 	reply := &RequestVoteReply{}
-	DPrintf("raft %v send request vote.", rf.me)
+	//DPrintf("raft %v send request vote.", rf.me)
 	for i := range rf.peers {
 		if i != rf.me {
 			go func() {
@@ -394,9 +412,18 @@ func (rf *Raft) startCandidate() {
 	}
 }
 
+//获取心跳超时和选举超时时间，设置为150～300ms中的一个随机数
+func (rf *Raft) getRandWaitTime() int {
+	return rf.randGen.Intn(1000) + 1000
+}
+
 func (rf *Raft) initParams() {
-	//收到心跳的时间初试为0
-	rf.recvHeartBeatTime = 0
+	//收到心跳的时间初试为当前时间
+	rf.recvHeartBeatTime = getMillisTime()
+
+	//随机生成
+	rf.randGen = rand.New(rand.NewSource(rf.voteTime + int64(rf.me)))
+	rf.heartBeatTimeout = rf.getRandWaitTime() //150~300 ms
 
 	//初始状态为Follower
 	rf.state = Follower
@@ -417,6 +444,8 @@ func (rf *Raft) initParams() {
 	rf.voteFor = 0
 	rf.voteTime = 0
 
+	rf.sendLogTime = 0
+
 	//分配log
 	rf.log = make([]logEntry, npeers)
 
@@ -427,10 +456,42 @@ func (rf *Raft) initParams() {
 	//这里从persister中回复数据
 	// initialize from state persisted before a crash
 	rf.readPersist(rf.persister.ReadRaftState())
+
 }
 
-const HEARTBEAT_TIMEOUT = 200 //ms
-const SLEEP_INTERVAL = 20     //ms
+func (rf *Raft) broadcastLog() {
+	//给所有其它raft节点发送添加日志请求
+	args := &AppendEntries{}
+
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+
+	if rf.commitIndex > 0 {
+		args.PrevLogIndex = rf.commitIndex - 1
+		args.PrevLogTerm = rf.log[args.PrevLogIndex].term
+	} else {
+		args.PrevLogIndex = -1
+		args.PrevLogTerm = -1
+	}
+
+	args.Entries = make([]logEntry, 1)
+
+	if rf.commitIndex > 0 {
+		args.Entries[0] = rf.log[rf.commitIndex]
+	}
+
+	args.LeaderCommit = rf.lastApplied
+
+	reply := &AppendEntriesReply{}
+	//DPrintf("raft %v send request vote.", rf.me)
+	for i := range rf.peers {
+		if i != rf.me {
+			go func() {
+				rf.sendAppendEntries(i, args, reply)
+			}()
+		}
+	}
+}
 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
@@ -442,12 +503,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//初始化raft的参数
 	rf.initParams()
 
-	//初始化随机化种子
-	r := rand.New(rand.NewSource(99))
-
 	// Your initialization code here (2A, 2B, 2C).
 	//创建一个协程监听leader的心跳，如果超过一定时间没有收到leader的心跳，那么就发出投票请求
 
+	const SLEEP_INTERVAL = 20
+	const SEND_LOG_INTERVAL = 100
 	go func() {
 
 		for {
@@ -457,17 +517,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//如果自己是leader
 			if rf.state == Leader {
 				//定时发送心跳
+				if rf.sendLogTime+SEND_LOG_INTERVAL < millisnow {
+					rf.sendLogTime = getMillisTime()
+					rf.broadcastLog()
+
+				}
 			}
 
 			//如果是follower
 			if rf.state == Follower {
 				//超过最长时限没有收到来自leader的心跳
-				if rf.recvHeartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
-					// 随机退避一个时间
-					s := r.Intn(200)
-					time.Sleep(time.Duration(s) * time.Millisecond)
+				if rf.recvHeartBeatTime+int64(rf.heartBeatTimeout) < millisnow {
 
-					//2、开始election
+					DPrintf("raft %v wait heartbeat timeout.time:%v, timeout:%v, curtime:%v", rf.me, rf.recvHeartBeatTime, rf.heartBeatTimeout, millisnow)
+
+					//重新生成心跳超时时间
+					rf.heartBeatTimeout = rf.getRandWaitTime()
+
+					//开始election
 					go rf.startCandidate()
 				}
 			}
@@ -476,9 +543,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			if rf.state == Candidate {
 				//检查是否选举超时
 				if rf.voteTime+int64(rf.maxVoteWaitTime) < millisnow {
-					// 随机退避一个时间
-					s := r.Intn(200)
-					time.Sleep(time.Duration(s) * time.Millisecond)
+
+					DPrintf("raft %v vote timeout", rf.me)
+					// 重新生成选举超时时间
+					rf.maxVoteWaitTime = rf.getRandWaitTime()
 
 					go rf.startCandidate()
 				}
