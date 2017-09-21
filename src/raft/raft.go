@@ -46,9 +46,9 @@ type State int
 
 //state
 const (
-	Follower  State = itoa //0
-	Candidate              //1
-	Leader                 //2
+	Follower  State = 0 //0
+	Candidate State = 1 //1
+	Leader    State = 2 //2
 )
 
 //
@@ -64,11 +64,11 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	heartBeatTime int64
-	currentTerm   int
-	voteFor       int
-	log           []logEntry
-	state         State
+	recvHeartBeatTime int64 //上一次收到心跳的时间
+	currentTerm       int
+	voteFor           int
+	log               []logEntry
+	state             State
 
 	commitIndex int //提交的最新的日志index
 	lastApplied int //应用到状态即的最新日志index
@@ -78,9 +78,9 @@ type Raft struct {
 	matchIndex []int
 
 	//candidate相关字段
-	votedForMe  []int //记录有哪些人给我投票了
-	voteTime    int64 //选举计时器
-	maxWaitTime int   //最大的选举等待时间，每次开始选举时从150～300ms中随机选择一个时间
+	votedForMe      []int //记录有哪些人给我投票了
+	voteTime        int64 //选举计时器
+	maxVoteWaitTime int   //最大的选举等待时间，每次开始选举时从150～300ms中随机选择一个时间
 }
 
 //添加日志/心跳包结构体
@@ -172,28 +172,40 @@ type RequestVoteReply struct {
 //处理请求投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	DPrintf("Receive Request vote.raft %v ", rf.me)
+	DPrintf("Raft %v receive request vote from raft %v", rf.me, args.CandidateId)
 
 	//请求投票的term大于自己的term，无条件给它投票，自己转为追随者
 	if args.Term > rf.currentTerm {
-		rf.state == Follower
+		rf.state = Follower
 		rf.currentTerm = args.Term
 		reply.VoteGranted = 1
 		rf.voteFor = args.CandidateId
 	}
 
+	//投票的term小于自己的，不给它投票
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
 	}
 
+	//args.term等于自己的
 	if args.Term == rf.currentTerm {
-		if rf
+		//已经给别人投票了
+		if rf.voteFor != 0 {
+			reply.VoteGranted = 0
+		} else {
+			//args的日志索引小于我的，不投票
+			if args.LastLogIndex < rf.commitIndex {
+				reply.VoteGranted = 0
+			} else {
+				//给请求者投票
+				reply.VoteGranted = 1
+				rf.voteFor = args.CandidateId
+			}
+		}
 	}
 
-
 	reply.Term = rf.currentTerm
-
 
 }
 
@@ -290,7 +302,7 @@ func getMillisTime() int64 {
 //处理添加日志请求
 func (rf *Raft) AppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) {
 	//记录收到来自leader的添加日志请求的时间
-	rf.heartBeatTime = getMillisTime()
+	rf.recvHeartBeatTime = getMillisTime()
 
 }
 
@@ -361,7 +373,7 @@ func (rf *Raft) startCandidate() {
 
 	//随机选择选举超时时间
 	r := rand.New(rand.NewSource(rf.voteTime))
-	rf.maxWaitTime = r.Intn(150) + 150
+	rf.maxVoteWaitTime = r.Intn(150) + 150
 
 	//给所有其它raft节点发送投票请求
 	args := &RequestVoteArgs{}
@@ -384,23 +396,33 @@ func (rf *Raft) startCandidate() {
 
 func (rf *Raft) initParams() {
 	//收到心跳的时间初试为0
-	rf.heartBeatTime = 0
-
-	rf.currentTerm = 0
-	rf.voteFor = 0
+	rf.recvHeartBeatTime = 0
 
 	//初始状态为Follower
 	rf.state = Follower
 
+	//日志索引和应用的日志索引赋初始值为-1
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 
-	//将投票计数清0
+	//初始化当前term为0
+	rf.currentTerm = 0
+
+	//投票相关字段清0
+	npeers := len(rf.peers)
+	rf.votedForMe = make([]int, npeers)
 	for i := range rf.votedForMe {
 		rf.votedForMe[i] = 0
 	}
-
+	rf.voteFor = 0
 	rf.voteTime = 0
+
+	//分配log
+	rf.log = make([]logEntry, npeers)
+
+	//分配
+	rf.nextIndex = make([]int, npeers)
+	rf.matchIndex = make([]int, npeers)
 
 	//这里从persister中回复数据
 	// initialize from state persisted before a crash
@@ -440,12 +462,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//如果是follower
 			if rf.state == Follower {
 				//超过最长时限没有收到来自leader的心跳
-				if rf.heartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
-					//1, 随机退避一个时间
-					s := r.Intn(50)
+				if rf.recvHeartBeatTime+HEARTBEAT_TIMEOUT < millisnow {
+					// 随机退避一个时间
+					s := r.Intn(200)
 					time.Sleep(time.Duration(s) * time.Millisecond)
 
-					//2, 开始election
+					//2、开始election
 					go rf.startCandidate()
 				}
 			}
@@ -453,7 +475,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			//如果是Candidate
 			if rf.state == Candidate {
 				//检查是否选举超时
-				if rf.voteTime+int64(rf.maxWaitTime) < millisnow {
+				if rf.voteTime+int64(rf.maxVoteWaitTime) < millisnow {
+					// 随机退避一个时间
+					s := r.Intn(200)
+					time.Sleep(time.Duration(s) * time.Millisecond)
+
 					go rf.startCandidate()
 				}
 			}

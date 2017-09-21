@@ -480,7 +480,7 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 		function := method.Func
 		function.Call([]reflect.Value{svc.rcvr, args.Elem(), replyv})
 
-		log.Println("service dispath replay:%v", replyv)
+		log.Println("service dispath replay:", replyv)
 		// encode the reply.
 		//将返回值编码
 		rb := new(bytes.Buffer)       //1， new一块buffer，保存编码后的二进制结果
