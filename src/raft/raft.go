@@ -84,6 +84,9 @@ type Raft struct {
 	votedForMe      []int //记录有哪些人给我投票了
 	voteTime        int64 //选举计时器
 	maxVoteWaitTime int   //最大的选举等待时间，每次开始选举时从150～300ms中随机选择一个时间
+
+	//debug
+	debugSwitch bool
 }
 
 //添加日志/心跳包结构体
@@ -92,7 +95,7 @@ type AppendEntries struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []logEntry //保存发给follower的日志条目，心跳包为0
+	//	Entries      []logEntry //保存发给follower的日志条目，心跳包为0
 	LeaderCommit int
 }
 
@@ -109,6 +112,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = (rf.state == Leader)
 	return term, isleader
 }
 
@@ -175,7 +180,7 @@ type RequestVoteReply struct {
 //处理请求投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	DPrintf("Raft %v receive request vote from raft %v", rf.me, args.CandidateId)
+	rf.DPrintf("raft %v receive request vote from raft %v, hist term:%v, mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 
 	//更新时间戳
 	rf.recvHeartBeatTime = getMillisTime()
@@ -187,23 +192,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = 1
 		rf.voteFor = args.CandidateId
 
-		DPrintf("me:%v, src:%v, vote for him", rf.me, args.CandidateId)
+		rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
 	} else if args.Term < rf.currentTerm {
 		//投票的term小于自己的，不给它投票
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
 
-		DPrintf("me:%v, src:%v, his term:%v lower than mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		rf.DPrintf("me:%v, src:%v, RequestVote his term:%v lower than mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 	} else if args.Term == rf.currentTerm {
 		//已经给别人投票了
 		if rf.voteFor != 0 {
 			reply.VoteGranted = 0
-			DPrintf("me:%v, src:%v, I have voted for %v", rf.me, args.CandidateId, rf.voteFor)
+			rf.DPrintf("me:%v, src:%v, I have voted for %v", rf.me, args.CandidateId, rf.voteFor)
 		} else {
 			//args的日志索引小于我的，不投票
 			if args.LastLogIndex < rf.commitIndex {
 				reply.VoteGranted = 0
-				DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.commitIndex)
+				rf.DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.commitIndex)
 			} else {
 				//给请求者投票
 				reply.VoteGranted = 1
@@ -250,16 +255,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
 	if ok {
-		DPrintf("me:%v, src:%v, receive vote reply:%v", rf.me, server, reply)
+		rf.DPrintf("raft %v receive vote reply from raft %v. reply: %v", rf.me, server, reply)
 		//回复包的term比自己的要大，变成追随者
 		if reply.Term > rf.currentTerm {
+			rf.DPrintf("me:%v, src:%v, vote reply's term:%v bigger than me:%v. I'll be follower:%v", rf.me, server, reply.Term, rf.currentTerm)
 			rf.state = Follower
 			return ok
 		}
 
 		//回复包的term比自己小，丢弃该回复
 		if reply.Term < rf.currentTerm {
-			DPrintf("RequestVote reply's term:%v is too small(mine:%v), discard...", reply.Term, rf.currentTerm)
+			rf.DPrintf("RequestVote reply's term:%v is too small(mine:%v), discard...", reply.Term, rf.currentTerm)
 			return false
 		}
 
@@ -276,12 +282,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			}
 		}
 
-		DPrintf("me:%v, Now I have get %v votes.", rf.me, count)
+		rf.DPrintf("me:%v, Now I have get %v votes.", rf.me, count)
 
 		//如果超过了半数，那么就变成领导人
 		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
-			DPrintf("me:%v,I'll be LEADER ~~~", rf.me)
+			rf.DPrintf("me:%v,I'll be LEADER term:%v~~~", rf.me, rf.currentTerm)
 		}
 
 	}
@@ -292,6 +298,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 //发送添加日志请求
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+	//收到的reply的term比我的大
+	if reply.Term > rf.currentTerm {
+		rf.DPrintf("me:%v, src:%v, recv append reply. his term:%v is bigger than me:%v. I'll change to follower", rf.me, server, reply.Term, rf.currentTerm)
+		rf.state = Follower
+	}
+
 	return ok
 }
 
@@ -314,11 +327,25 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	//记录收到来自leader的添加日志请求的时间
 	rf.recvHeartBeatTime = getMillisTime()
 
-	DPrintf("me:%v, src:%v, Receive append log request.", rf.me, args.LeaderId)
+	rf.DPrintf("raft %v receive append log request from raft %v.his term:%v, my term:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 	reply.Success = 1
 	if args.Term < rf.currentTerm {
-		DPrintf("me:%v, src:%v, his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+		//leader的term比自己还小
+		rf.DPrintf("me:%v, src:%v, AppendEntries his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Success = 0
+	} else if args.Term == rf.currentTerm {
+		//我也是leader，收到了来自拥有相同term的leader的append entry。
+		if rf.state == Leader {
+			panic("[ERROR]Have two leader...")
+		} else if rf.state == Candidate {
+			//竞选者收到了另一个leader的添加日志请求
+			rf.state = Follower
+			rf.DPrintf("me:%v I'm  a candidate. receve append log from raft:%v, change to Follower", rf.me, args.LeaderId)
+		}
+	} else {
+		rf.DPrintf("me:%v, src:%v, AppendEntries my term:%v is lower than leader:%v, my state %v change to Follower", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
+		rf.currentTerm = args.Term
+		rf.state = Follower
 	}
 
 	reply.Term = rf.currentTerm
@@ -356,6 +383,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.debugSwitch = false
+}
+
+func (rf *Raft) DPrintf(format string, a ...interface{}) (n int, err error) {
+	DPrintf(format, a...)
+	return
 }
 
 //
@@ -371,7 +404,7 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) startCandidate() {
-	//DPrintf("raft %v start to candidate.", rf.me)
+
 	//变成竞争者状态
 	rf.state = Candidate
 
@@ -382,6 +415,7 @@ func (rf *Raft) startCandidate() {
 
 	//将term + 1
 	rf.currentTerm += 1
+	rf.DPrintf("raft %v start to candidate.term: %v", rf.me, rf.currentTerm)
 
 	//为自己投票
 	rf.votedForMe[rf.me] = 1
@@ -402,12 +436,13 @@ func (rf *Raft) startCandidate() {
 		args.LastLogTerm = rf.log[rf.commitIndex].term
 	}
 	reply := &RequestVoteReply{}
-	//DPrintf("raft %v send request vote.", rf.me)
+
 	for i := range rf.peers {
 		if i != rf.me {
-			go func() {
-				rf.sendRequestVote(i, args, reply)
-			}()
+			rf.DPrintf("raft %v send request vote to raft %v. term:%v", rf.me, i, rf.currentTerm)
+			go func(svr int) {
+				rf.sendRequestVote(svr, args, reply)
+			}(i)
 		}
 	}
 }
@@ -453,6 +488,8 @@ func (rf *Raft) initParams() {
 	rf.nextIndex = make([]int, npeers)
 	rf.matchIndex = make([]int, npeers)
 
+	rf.debugSwitch = true
+
 	//这里从persister中回复数据
 	// initialize from state persisted before a crash
 	rf.readPersist(rf.persister.ReadRaftState())
@@ -474,21 +511,24 @@ func (rf *Raft) broadcastLog() {
 		args.PrevLogTerm = -1
 	}
 
-	args.Entries = make([]logEntry, 1)
+	/*
+		args.Entries = make([]logEntry, 1)
 
-	if rf.commitIndex > 0 {
-		args.Entries[0] = rf.log[rf.commitIndex]
-	}
+		if rf.commitIndex > 0 {
+			args.Entries[0] = rf.log[rf.commitIndex]
+		}
+	*/
 
 	args.LeaderCommit = rf.lastApplied
 
 	reply := &AppendEntriesReply{}
-	//DPrintf("raft %v send request vote.", rf.me)
+	//	rf.DPrintf("raft %v send append log.", rf.me)
 	for i := range rf.peers {
 		if i != rf.me {
-			go func() {
-				rf.sendAppendEntries(i, args, reply)
-			}()
+			rf.DPrintf("raft %v send append log to raft %v", rf.me, i)
+			go func(svr int) {
+				rf.sendAppendEntries(svr, args, reply)
+			}(i)
 		}
 	}
 }
@@ -522,14 +562,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.broadcastLog()
 
 				}
-			}
-
-			//如果是follower
-			if rf.state == Follower {
+			} else if rf.state == Follower { //如果是follower
 				//超过最长时限没有收到来自leader的心跳
 				if rf.recvHeartBeatTime+int64(rf.heartBeatTimeout) < millisnow {
 
-					DPrintf("raft %v wait heartbeat timeout.time:%v, timeout:%v, curtime:%v", rf.me, rf.recvHeartBeatTime, rf.heartBeatTimeout, millisnow)
+					rf.DPrintf("raft %v wait heartbeat timeout.time:%v, timeout:%v", rf.me, rf.recvHeartBeatTime, rf.heartBeatTimeout)
 
 					//重新生成心跳超时时间
 					rf.heartBeatTimeout = rf.getRandWaitTime()
@@ -537,14 +574,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					//开始election
 					go rf.startCandidate()
 				}
-			}
-
-			//如果是Candidate
-			if rf.state == Candidate {
+			} else if rf.state == Candidate { //如果是Candidate
 				//检查是否选举超时
 				if rf.voteTime+int64(rf.maxVoteWaitTime) < millisnow {
 
-					DPrintf("raft %v vote timeout", rf.me)
+					rf.DPrintf("raft %v vote timeout", rf.me)
 					// 重新生成选举超时时间
 					rf.maxVoteWaitTime = rf.getRandWaitTime()
 

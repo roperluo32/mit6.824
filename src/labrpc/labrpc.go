@@ -467,7 +467,10 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 		//解码输入的参数
 		ab := bytes.NewBuffer(req.args)
 		ad := gob.NewDecoder(ab)
-		ad.Decode(args.Interface())
+		err := ad.Decode(args.Interface())
+		if err != nil {
+			log.Fatalf("Decode ", req.argsType, "fail. err: ", err)
+		}
 
 		// allocate space for the reply.
 		//分配返回值
@@ -483,11 +486,11 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 		//log.Println("service dispath replay:", replyv)
 		// encode the reply.
 		//将返回值编码
-		rb := new(bytes.Buffer)       //1， new一块buffer，保存编码后的二进制结果
-		re := gob.NewEncoder(rb)      //2， 新建一个编码器，将buffer传入保存结果
-		err := re.EncodeValue(replyv) //3， 将结果replyv编码
+		rb := new(bytes.Buffer)      //1， new一块buffer，保存编码后的二进制结果
+		re := gob.NewEncoder(rb)     //2， 新建一个编码器，将buffer传入保存结果
+		err = re.EncodeValue(replyv) //3， 将结果replyv编码
 		if err != nil {
-			log.Println("service dispatch EncodeValue fail", err)
+			log.Fatalf("service dispatch EncodeValue fail", err)
 		}
 
 		return replyMsg{true, rb.Bytes()}

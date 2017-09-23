@@ -45,19 +45,23 @@ func TestReElection2A(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	fmt.Printf("Test (2A): election after network failure ...\n")
+	fmt.Printf("==== Test (2A): election after network failure ...\n")
 
 	leader1 := cfg.checkOneLeader()
+
+	fmt.Printf("==== Test (2A): disconnect leader1...\n")
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
+	fmt.Printf("==== Test (2A): reconnect leader1...\n")
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
+	fmt.Printf("==== Test (2A): disconnect leader2...\n")
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
