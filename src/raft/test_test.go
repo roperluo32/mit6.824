@@ -145,6 +145,7 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
+	fmt.Printf("[DISCONNECTING] raft %v, %v, %v", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
@@ -164,6 +165,7 @@ func TestFailNoAgree2B(t *testing.T) {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
+	fmt.Printf("[RECONNECTING] raft %v, %v, %v", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 	// repair
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
@@ -201,6 +203,7 @@ loop:
 			time.Sleep(3 * time.Second)
 		}
 
+		//等待leader的产生，并向leader提交一个value（1）
 		leader := cfg.checkOneLeader()
 		_, term, ok := cfg.rafts[leader].Start(1)
 		if !ok {
@@ -210,25 +213,39 @@ loop:
 
 		iters := 5
 		var wg sync.WaitGroup
+		//创建一个有缓冲区大小为5的channel is
 		is := make(chan int, iters)
 		for ii := 0; ii < iters; ii++ {
 			wg.Add(1)
+
+			//并发提交5个值， 因此5个值的顺序应该是随机的
 			go func(i int) {
 				defer wg.Done()
+				//提交（100， 101， 102， 103， 104）5个值
+				fmt.Printf("[2B] coroutine start value:%v, of i:%v\n", 100+i, i)
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+				fmt.Printf("[2B] coroutine return i:%v, term:%v ok:%v\n", i, term1, ok)
 				if term1 != term {
 					return
 				}
 				if ok != true {
 					return
 				}
+
+				//提交成功后，将插入的索引放入channel is中， 比如（2， 3， 4， 5， 6）
 				is <- i
+				fmt.Printf("[2B] insert %v into channel\n", i)
 			}(ii)
+		}
+
+		for testi := range is {
+			fmt.Printf("[2B] debug0 print channel:%v\n", testi)
 		}
 
 		wg.Wait()
 		close(is)
 
+		//检查3个server的term，如果有改变，那么重新来过
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts
@@ -238,8 +255,16 @@ loop:
 
 		failed := false
 		cmds := []int{}
+
+		for testi := range is {
+			fmt.Printf("[2B] debug print channel:%v\n", testi)
+		}
+
+		//遍历channel中的值
 		for index := range is {
+			fmt.Printf("[TEST2B] index:%v of channel\n", index)
 			cmd := cfg.wait(index, servers, term)
+			fmt.Printf("[TEST2B] index:%v of channel value:%v\n", index, cmd)
 			if ix, ok := cmd.(int); ok {
 				if ix == -1 {
 					// peers have moved on to later terms

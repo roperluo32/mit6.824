@@ -38,8 +38,8 @@ type ApplyMsg struct {
 }
 
 type logEntry struct {
-	term  int
-	value int
+	Term  int
+	Value int
 }
 
 type State int
@@ -59,6 +59,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
+	applyCh   chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -67,17 +68,22 @@ type Raft struct {
 	recvHeartBeatTime int64      //上一次收到心跳的时间
 	heartBeatTimeout  int        //心跳超时，每次都重新随机生成（150～300ms）
 	randGen           *rand.Rand //随机数生成器
-	currentTerm       int
-	voteFor           int
-	log               []logEntry
-	state             State
 
-	commitIndex int //提交的最新的日志index
-	lastApplied int //应用到状态即的最新日志index
+	currentTerm int
+	state       State //当前角色
+
+	voteFor int
+
+	log              []logEntry //存储客户端的请求日志
+	logIndex         int        //添加入日志索引，指向下一个可以插入日志的索引
+	commitIndex      int        //提交的最新的日志index，指向最后一个已经提交的日志索引
+	commitIndexToCfg int        //提交给config的日志index
+	lastApplied      int        //应用到状态即的最新日志index
+	lastAppliedTime  int64      //上一次同步的时间
 
 	//leader专属字段
-	nextIndex   []int
-	matchIndex  []int
+	nextIndex   []int //记录下一个发给follower的日志索引
+	matchIndex  []int //记录已经成功复制给follower的日志索引，用来计算可以提交的日志
 	sendLogTime int64 //发送日志的时间
 
 	//candidate相关字段
@@ -95,7 +101,7 @@ type AppendEntries struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	//	Entries      []logEntry //保存发给follower的日志条目，心跳包为0
+	Entries      [5]logEntry //保存发给follower的日志条目，心跳包为0, 一次最多发5条
 	LeaderCommit int
 }
 
@@ -180,42 +186,65 @@ type RequestVoteReply struct {
 //处理请求投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.DPrintf("raft %v receive request vote from raft %v, hist term:%v, mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 
 	//更新时间戳
 	rf.recvHeartBeatTime = getMillisTime()
 
-	//请求投票的term大于自己的term，无条件给它投票，自己转为追随者
-	if args.Term > rf.currentTerm {
-		rf.state = Follower
-		rf.currentTerm = args.Term
-		reply.VoteGranted = 1
-		rf.voteFor = args.CandidateId
-
-		rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
-	} else if args.Term < rf.currentTerm {
-		//投票的term小于自己的，不给它投票
+	rf.DPrintf("raft %v receive request vote from raft %v, his term:%v,logindex:%v mine term:%v, index:%v. time:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm, rf.logIndex-1, rf.recvHeartBeatTime)
+	//请求投票的term小于自己的，不给它投票
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = 0
-
 		rf.DPrintf("me:%v, src:%v, RequestVote his term:%v lower than mine:%v", rf.me, args.CandidateId, args.Term, rf.currentTerm)
-	} else if args.Term == rf.currentTerm {
+		return
+	}
+
+	if args.Term == rf.currentTerm {
 		//已经给别人投票了
-		if rf.voteFor != 0 {
+		if rf.voteFor >= 0 {
 			reply.VoteGranted = 0
 			rf.DPrintf("me:%v, src:%v, I have voted for %v", rf.me, args.CandidateId, rf.voteFor)
-		} else {
-			//args的日志索引小于我的，不投票
-			if args.LastLogIndex < rf.commitIndex {
-				reply.VoteGranted = 0
-				rf.DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.commitIndex)
-			} else {
-				//给请求者投票
-				reply.VoteGranted = 1
-				rf.voteFor = args.CandidateId
-			}
+			reply.Term = rf.currentTerm
+
+			return
 		}
 	}
+
+	//请求投票的term大于自己的term，
+	if args.Term > rf.currentTerm {
+		//转为follower
+		rf.state = Follower
+		rf.currentTerm = args.Term
+		rf.DPrintf("me:%v, src:%v, his term:%v is bigger than me:%v. I'll change state:%v to follower", rf.me, args.CandidateId, args.Term, rf.currentTerm, rf.state)
+	}
+
+	//args的日志索引小于我的，不投票
+	if args.LastLogIndex < rf.logIndex-1 {
+		reply.VoteGranted = 0
+		reply.Term = rf.currentTerm
+		rf.DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.logIndex-1)
+		return
+	}
+
+	//args的term小于我的，不投票
+	if args.LastLogIndex == rf.logIndex-1 && args.LastLogIndex > 0 {
+		if args.LastLogTerm < rf.log[rf.logIndex-1].Term {
+			reply.VoteGranted = 0
+			reply.Term = rf.currentTerm
+			rf.DPrintf("me:%v, src:%v, his term:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogTerm, rf.log[rf.logIndex-1].Term)
+			return
+		}
+	}
+
+	//给请求者投票
+	reply.VoteGranted = 1
+	rf.voteFor = args.CandidateId
+	reply.Term = rf.currentTerm
+	rf.state = Follower //给别人投票了，就变为follower
+
+	rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
+
+	return
 
 	reply.Term = rf.currentTerm
 
@@ -254,6 +283,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
+	//已经不是candidate了，可能在等待回复的过程中收到了term更大的请求
+	if rf.state == Follower {
+		rf.DPrintf("raft %v receive vote reply, but I'm not candidate now", rf.me)
+		return false
+	}
+
 	if ok {
 		rf.DPrintf("raft %v receive vote reply from raft %v. reply: %v", rf.me, server, reply)
 		//回复包的term比自己的要大，变成追随者
@@ -287,7 +322,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		//如果超过了半数，那么就变成领导人
 		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
-			rf.DPrintf("me:%v,I'll be LEADER term:%v~~~", rf.me, rf.currentTerm)
+			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v~~~", rf.me, rf.currentTerm, rf.logIndex)
 		}
 
 	}
@@ -303,6 +338,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 	if reply.Term > rf.currentTerm {
 		rf.DPrintf("me:%v, src:%v, recv append reply. his term:%v is bigger than me:%v. I'll change to follower", rf.me, server, reply.Term, rf.currentTerm)
 		rf.state = Follower
+	}
+
+	//follower 应用日志失败了
+	if reply.Success == 0 {
+		rf.DPrintf("raft %v send log to raft %v failed.", rf.me, server)
+		if rf.nextIndex[server] > 0 {
+			rf.nextIndex[server]--
+		}
+	} else {
+		for i := range args.Entries {
+			if args.Entries[i].Term >= 0 {
+				rf.nextIndex[server]++
+			}
+		}
+		//更新已经和server匹配的日志索引
+		rf.matchIndex[server] = rf.nextIndex[server] - 1
+
+		rf.DPrintf("raft %v send log to raft %v success. myindex:%v, nextindex:%v", rf.me, server, rf.logIndex, rf.nextIndex)
 	}
 
 	return ok
@@ -322,31 +375,79 @@ func getMillisTime() int64 {
 	return millis
 }
 
+//将leader的日志应用的本机
+func (rf *Raft) applyLogEntries(args *AppendEntries, reply *AppendEntriesReply) {
+	//我的日志比leader的previndex还小
+	if args.PrevLogIndex >= rf.logIndex {
+		rf.DPrintf("raft %v apply log and find mine logindex:%v is lower than previndex:%v", rf.me, rf.logIndex, args.PrevLogIndex)
+		reply.Success = 0
+		return
+	}
+
+	if args.PrevLogIndex >= 0 {
+		//我在previndex位置上的日志term与leader的不一致
+		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			rf.DPrintf("raft %v apply log and find my term:%v is not equal to prev term:%v", rf.me, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+			reply.Success = 0
+			return
+		}
+	}
+
+	//拷贝日志
+	rf.logIndex = args.PrevLogIndex + 1
+	for i := range args.Entries {
+		if args.Entries[i].Term > 0 {
+			rf.log[rf.logIndex] = args.Entries[i]
+			rf.logIndex++
+		}
+	}
+
+	//同步leader的commit索引
+	if args.LeaderCommit >= rf.logIndex {
+		rf.commitIndex = rf.logIndex - 1
+	} else {
+		rf.commitIndex = args.LeaderCommit
+	}
+
+	reply.Success = 1
+	rf.DPrintf("raft %v apply log success.my logindex:%v, commitindex:%v, log[0]:%v", rf.me, rf.logIndex, rf.commitIndex, rf.log[0])
+
+	return
+}
+
 //处理添加日志请求
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	//记录收到来自leader的添加日志请求的时间
 	rf.recvHeartBeatTime = getMillisTime()
 
-	rf.DPrintf("raft %v receive append log request from raft %v.his term:%v, my term:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
+	rf.DPrintf("raft %v receive append log request from raft %v.his term:%v, my term:%v, args:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm, args)
 	reply.Success = 1
+
+	//leader的term比自己还小
 	if args.Term < rf.currentTerm {
-		//leader的term比自己还小
 		rf.DPrintf("me:%v, src:%v, AppendEntries his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Success = 0
-	} else if args.Term == rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term == rf.currentTerm {
 		//我也是leader，收到了来自拥有相同term的leader的append entry。
 		if rf.state == Leader {
-			panic("[ERROR]Have two leader...")
+			rf.DPrintf("me: %v I'm a leader, but raft %v is a leader too. our term is:%v, my logindex is %v, his logindex is %v", rf.me, args.LeaderId, rf.currentTerm, rf.logIndex, args.PrevLogIndex)
+			panic("[error] Have two leadr have same term.")
 		} else if rf.state == Candidate {
 			//竞选者收到了另一个leader的添加日志请求
 			rf.state = Follower
 			rf.DPrintf("me:%v I'm  a candidate. receve append log from raft:%v, change to Follower", rf.me, args.LeaderId)
 		}
-	} else {
-		rf.DPrintf("me:%v, src:%v, AppendEntries my term:%v is lower than leader:%v, my state %v change to Follower", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
-		rf.currentTerm = args.Term
-		rf.state = Follower
 	}
+
+	//	rf.DPrintf("me:%v, src:%v, AppendEntries my term:%v is lower than leader:%v, my state %v change to Follower", rf.me, args.LeaderId, args.Term, rf.currentTerm, rf.state)
+	rf.currentTerm = args.Term
+	rf.state = Follower
+
+	rf.applyLogEntries(args, reply)
 
 	reply.Term = rf.currentTerm
 }
@@ -371,6 +472,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if rf.state != Leader {
+		return -1, rf.currentTerm, false
+	}
+
+	if cmd, ok := command.(int); ok {
+		loge := logEntry{}
+		loge.Term = rf.currentTerm
+		loge.Value = cmd
+		rf.log[rf.logIndex] = loge
+		rf.logIndex++
+		rf.DPrintf("[CLIENT REQ] request command:%v, index:%v, term:%v, raft:%v.", command, rf.logIndex, rf.currentTerm, rf.me)
+		return rf.logIndex, rf.currentTerm, true
+	}
 
 	return index, term, isLeader
 }
@@ -387,6 +501,9 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) DPrintf(format string, a ...interface{}) (n int, err error) {
+	if rf.debugSwitch == false {
+		return
+	}
 	DPrintf(format, a...)
 	return
 }
@@ -431,15 +548,15 @@ func (rf *Raft) startCandidate() {
 	args := &RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
-	args.LastLogIndex = rf.commitIndex
-	if rf.commitIndex >= 0 {
-		args.LastLogTerm = rf.log[rf.commitIndex].term
+	args.LastLogIndex = rf.logIndex - 1
+	if rf.logIndex > 0 {
+		args.LastLogTerm = rf.log[rf.logIndex-1].Term
 	}
 	reply := &RequestVoteReply{}
-
+	rf.DPrintf("raft %v start send request vote. term:%v", rf.me, rf.currentTerm)
 	for i := range rf.peers {
 		if i != rf.me {
-			rf.DPrintf("raft %v send request vote to raft %v. term:%v", rf.me, i, rf.currentTerm)
+			//rf.DPrintf("raft %v send request vote to raft %v. term:%v", rf.me, i, rf.currentTerm)
 			go func(svr int) {
 				rf.sendRequestVote(svr, args, reply)
 			}(i)
@@ -457,15 +574,11 @@ func (rf *Raft) initParams() {
 	rf.recvHeartBeatTime = getMillisTime()
 
 	//随机生成
-	rf.randGen = rand.New(rand.NewSource(rf.voteTime + int64(rf.me)))
+	rf.randGen = rand.New(rand.NewSource(rf.recvHeartBeatTime + int64(rf.me)))
 	rf.heartBeatTimeout = rf.getRandWaitTime() //150~300 ms
 
 	//初始状态为Follower
 	rf.state = Follower
-
-	//日志索引和应用的日志索引赋初始值为-1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
 
 	//初始化当前term为0
 	rf.currentTerm = 0
@@ -476,17 +589,30 @@ func (rf *Raft) initParams() {
 	for i := range rf.votedForMe {
 		rf.votedForMe[i] = 0
 	}
-	rf.voteFor = 0
+	rf.voteFor = -1
 	rf.voteTime = 0
+
+	//日志索引和应用的日志索引赋初始值为-1
+	rf.commitIndex = -1
+	rf.commitIndexToCfg = -1
+	rf.lastApplied = -1
+	rf.lastAppliedTime = getMillisTime()
+	rf.matchIndex = make([]int, npeers)
+	for i := range rf.matchIndex {
+		rf.matchIndex[i] = -1
+	}
 
 	rf.sendLogTime = 0
 
-	//分配log
-	rf.log = make([]logEntry, npeers)
+	//分配log以及初始化logindex
+	rf.log = make([]logEntry, 10000)
+	rf.logIndex = 0
 
 	//分配
 	rf.nextIndex = make([]int, npeers)
-	rf.matchIndex = make([]int, npeers)
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = rf.logIndex
+	}
 
 	rf.debugSwitch = true
 
@@ -497,40 +623,91 @@ func (rf *Raft) initParams() {
 }
 
 func (rf *Raft) broadcastLog() {
-	//给所有其它raft节点发送添加日志请求
-	args := &AppendEntries{}
 
-	args.Term = rf.currentTerm
-	args.LeaderId = rf.me
-
-	if rf.commitIndex > 0 {
-		args.PrevLogIndex = rf.commitIndex - 1
-		args.PrevLogTerm = rf.log[args.PrevLogIndex].term
-	} else {
-		args.PrevLogIndex = -1
-		args.PrevLogTerm = -1
-	}
-
-	/*
-		args.Entries = make([]logEntry, 1)
-
-		if rf.commitIndex > 0 {
-			args.Entries[0] = rf.log[rf.commitIndex]
-		}
-	*/
-
-	args.LeaderCommit = rf.lastApplied
-
-	reply := &AppendEntriesReply{}
 	//	rf.DPrintf("raft %v send append log.", rf.me)
 	for i := range rf.peers {
 		if i != rf.me {
-			rf.DPrintf("raft %v send append log to raft %v", rf.me, i)
+
 			go func(svr int) {
+				//给所有其它raft节点发送添加日志请求
+				args := &AppendEntries{}
+
+				//设置除日志以外的字段
+				args.Term = rf.currentTerm
+				args.LeaderId = rf.me
+				args.LeaderCommit = rf.commitIndex
+
+				if rf.nextIndex[svr] > 0 {
+					args.PrevLogIndex = rf.nextIndex[svr] - 1
+					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				} else {
+					args.PrevLogIndex = -1
+					args.PrevLogTerm = -1
+				}
+
+				//设置日志数组
+				nSendLog := rf.logIndex - rf.nextIndex[svr]
+				if nSendLog > len(args.Entries) {
+					nSendLog = len(args.Entries)
+				}
+				for i := range args.Entries {
+					args.Entries[i].Term = -1
+					args.Entries[i].Value = -1
+				}
+				for i := 0; i < nSendLog; i++ {
+					tmpIdx := rf.nextIndex[svr] + i
+					if tmpIdx < rf.logIndex {
+						args.Entries[i] = rf.log[tmpIdx]
+					}
+				}
+
+				rf.DPrintf("raft %v send append log to raft %v, my logindex:%v, his next index:%v, prev index:%v, term:%v", rf.me, i, rf.logIndex, rf.nextIndex[svr], args.PrevLogIndex, args.PrevLogTerm)
+				reply := &AppendEntriesReply{}
 				rf.sendAppendEntries(svr, args, reply)
 			}(i)
 		}
 	}
+}
+
+func (rf *Raft) commitLog() {
+	r := make(map[int]int)
+	for i := range rf.matchIndex {
+		for j := 0; j <= rf.matchIndex[i]; j++ {
+			r[j] = r[j] + 1
+		}
+	}
+
+	maxi := -1
+	npeers := len(rf.matchIndex)
+	for i := range r {
+		if r[i] >= npeers/2 {
+			if i > maxi {
+				maxi = i
+			}
+		}
+	}
+
+	if rf.commitIndex > maxi {
+		rf.DPrintf("[WARN] leader raft %v commit log. my commitindex:%v is bigger than compute index:%v", rf.me, rf.commitIndex, maxi)
+		//	panic("[ERROR] commit log error")
+	}
+
+	if maxi < 0 {
+		return
+	}
+
+	rf.commitIndex = maxi
+	rf.DPrintf("leader raft %v commit log index:%v", rf.me, rf.commitIndex)
+}
+
+func (rf *Raft) commitLogToConfig(index int) {
+	var apply ApplyMsg
+	apply.Index = index + 1
+	apply.Command = rf.log[index].Value
+
+	rf.DPrintf("raft %v commit log(index:%v, value:%v) to config.", rf.me, apply.Index, apply.Command)
+
+	rf.applyCh <- apply
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
@@ -539,6 +716,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
 
 	//初始化raft的参数
 	rf.initParams()
@@ -547,7 +725,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//创建一个协程监听leader的心跳，如果超过一定时间没有收到leader的心跳，那么就发出投票请求
 
 	const SLEEP_INTERVAL = 20
-	const SEND_LOG_INTERVAL = 100
+	const SEND_LOG_INTERVAL = 200
+	const APPLY_LOG_INTERVAL = 200
+
 	go func() {
 
 		for {
@@ -556,33 +736,49 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 			//如果自己是leader
 			if rf.state == Leader {
+
 				//定时发送心跳
 				if rf.sendLogTime+SEND_LOG_INTERVAL < millisnow {
+					//提交已复制给大部分server的日志
+					rf.commitLog()
+
 					rf.sendLogTime = getMillisTime()
 					rf.broadcastLog()
-
 				}
 			} else if rf.state == Follower { //如果是follower
 				//超过最长时限没有收到来自leader的心跳
 				if rf.recvHeartBeatTime+int64(rf.heartBeatTimeout) < millisnow {
 
-					rf.DPrintf("raft %v wait heartbeat timeout.time:%v, timeout:%v", rf.me, rf.recvHeartBeatTime, rf.heartBeatTimeout)
+					rf.DPrintf("raft %v wait heartbeat timeout.time:%v, timeout:%v, now:%v", rf.me, rf.recvHeartBeatTime, rf.heartBeatTimeout, millisnow)
 
 					//重新生成心跳超时时间
 					rf.heartBeatTimeout = rf.getRandWaitTime()
 
 					//开始election
-					go rf.startCandidate()
+					rf.startCandidate()
 				}
 			} else if rf.state == Candidate { //如果是Candidate
 				//检查是否选举超时
 				if rf.voteTime+int64(rf.maxVoteWaitTime) < millisnow {
 
-					rf.DPrintf("raft %v vote timeout", rf.me)
+					rf.DPrintf("raft %v vote timeout, waittime:%v", rf.me, rf.maxVoteWaitTime)
 					// 重新生成选举超时时间
 					rf.maxVoteWaitTime = rf.getRandWaitTime()
 
-					go rf.startCandidate()
+					rf.startCandidate()
+				}
+			}
+
+			//应用日志
+			if rf.lastAppliedTime+APPLY_LOG_INTERVAL < millisnow {
+				if rf.commitIndex > rf.lastApplied && rf.lastApplied < rf.logIndex {
+					rf.lastApplied++
+
+					//1，将日志的值应用到状态机
+					//rf.log[rf.commitIndex]  ==> 状态机
+
+					//2，将日志提交到config
+					rf.commitLogToConfig(rf.lastApplied)
 				}
 			}
 		}

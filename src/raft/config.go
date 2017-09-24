@@ -61,6 +61,7 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
 		}
 	})
+	fmt.Printf("Num CPU:%v\n", runtime.NumCPU())
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
@@ -198,6 +199,7 @@ func (cfg *config) start1(i int) {
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
 
+				fmt.Printf("configlog of raft %v, %v\n", i, cfg.logs[i])
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
@@ -368,6 +370,8 @@ func (cfg *config) checkNoLeader() {
 }
 
 // how many servers think a log entry is committed?
+//统计有多少个raft提交了对应index上的日志
+//返回raft的个数以及索引为index的日志记录的值cmd
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	cmd := -1
@@ -394,6 +398,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 // wait for at least n servers to commit.
 // but don't wait forever.
+//等待至少有n个server在提交了索引值为index的日志
 func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	to := 10 * time.Millisecond
 	for iters := 0; iters < 30; iters++ {
@@ -437,6 +442,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
 		index := -1
+		//选择一个连接的raft，调用start尝试提交一个cmd
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
@@ -458,6 +464,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
+			//检查是否提交成功，2秒钟内要提交给所有server
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
