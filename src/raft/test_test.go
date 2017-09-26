@@ -222,7 +222,6 @@ loop:
 			go func(i int) {
 				defer wg.Done()
 				//提交（100， 101， 102， 103， 104）5个值
-				fmt.Printf("[2B] coroutine start value:%v, of i:%v\n", 100+i, i)
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
 				fmt.Printf("[2B] coroutine return i:%v, term:%v ok:%v\n", i, term1, ok)
 				if term1 != term {
@@ -234,12 +233,7 @@ loop:
 
 				//提交成功后，将插入的索引放入channel is中， 比如（2， 3， 4， 5， 6）
 				is <- i
-				fmt.Printf("[2B] insert %v into channel\n", i)
 			}(ii)
-		}
-
-		for testi := range is {
-			fmt.Printf("[2B] debug0 print channel:%v\n", testi)
 		}
 
 		wg.Wait()
@@ -249,6 +243,7 @@ loop:
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts
+				fmt.Printf("[2B] term:%v changed. raft:%v term is %v -- can't expect low RPC counts \n", term, j, t)
 				continue loop
 			}
 		}
@@ -256,13 +251,10 @@ loop:
 		failed := false
 		cmds := []int{}
 
-		for testi := range is {
-			fmt.Printf("[2B] debug print channel:%v\n", testi)
-		}
+		fmt.Printf("[2B] debug print channel len %v\n", len(is))
 
 		//遍历channel中的值
 		for index := range is {
-			fmt.Printf("[TEST2B] index:%v of channel\n", index)
 			cmd := cfg.wait(index, servers, term)
 			fmt.Printf("[TEST2B] index:%v of channel value:%v\n", index, cmd)
 			if ix, ok := cmd.(int); ok {
@@ -319,13 +311,17 @@ func TestRejoin2B(t *testing.T) {
 
 	fmt.Printf("Test (2B): rejoin of partitioned leader ...\n")
 
+	//提交101
 	cfg.one(101, servers)
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
+
+	fmt.Printf("Test (2B): leader1 disconnect.\n")
 	cfg.disconnect(leader1)
 
 	// make old leader try to agree on some entries
+	//旧leader提交3个值
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
@@ -335,9 +331,11 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("Test (2B): leader2 disconnect.\n")
 	cfg.disconnect(leader2)
 
 	// old leader connected again
+	fmt.Printf("Test (2B): leader1 reconnect.\n")
 	cfg.connect(leader1)
 
 	cfg.one(104, 2)

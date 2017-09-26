@@ -212,17 +212,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//请求投票的term大于自己的term，
 	if args.Term > rf.currentTerm {
+		rf.DPrintf("me:%v, src:%v, his term:%v is bigger than me:%v. I'll change state:%v to follower", rf.me, args.CandidateId, args.Term, rf.currentTerm, rf.state)
+
 		//转为follower
 		rf.state = Follower
 		rf.currentTerm = args.Term
-		rf.DPrintf("me:%v, src:%v, his term:%v is bigger than me:%v. I'll change state:%v to follower", rf.me, args.CandidateId, args.Term, rf.currentTerm, rf.state)
 	}
 
+	myLastLogTerm := -1
+	if rf.logIndex > 0 {
+		myLastLogTerm = rf.log[rf.logIndex-1].Term
+	}
+
+	rf.DPrintf("me:%v, src:%v, his index:%v term:%v  mine:%v %v", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.logIndex-1, myLastLogTerm)
+
 	//args的日志索引小于我的，不投票
-	if args.LastLogIndex < rf.logIndex-1 {
+	if args.LastLogIndex < rf.logIndex-1 || args.LastLogTerm < myLastLogTerm {
 		reply.VoteGranted = 0
 		reply.Term = rf.currentTerm
-		rf.DPrintf("me:%v, src:%v, his index:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.logIndex-1)
+		rf.DPrintf("me:%v, src:%v, his index:%v term:%v is lower than mine:%v %v", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.logIndex-1, myLastLogTerm)
 		return
 	}
 
@@ -322,6 +330,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		//如果超过了半数，那么就变成领导人
 		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
+			rf.initLeader()
 			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v~~~", rf.me, rf.currentTerm, rf.logIndex)
 		}
 
@@ -477,13 +486,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	if cmd, ok := command.(int); ok {
+		rf.mu.Lock()
 		loge := logEntry{}
 		loge.Term = rf.currentTerm
 		loge.Value = cmd
 		rf.log[rf.logIndex] = loge
 		rf.logIndex++
+		rf.nextIndex[rf.me] = rf.logIndex
 		rf.DPrintf("[CLIENT REQ] request command:%v, index:%v, term:%v, raft:%v.", command, rf.logIndex, rf.currentTerm, rf.me)
-		return rf.logIndex, rf.currentTerm, true
+
+		logidx := rf.logIndex
+		tm := rf.currentTerm
+		rf.mu.Unlock()
+
+		return logidx, tm, true
 	}
 
 	return index, term, isLeader
@@ -567,6 +583,12 @@ func (rf *Raft) startCandidate() {
 //获取心跳超时和选举超时时间，设置为150～300ms中的一个随机数
 func (rf *Raft) getRandWaitTime() int {
 	return rf.randGen.Intn(1000) + 1000
+}
+
+func (rf *Raft) initLeader() {
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = rf.logIndex
+	}
 }
 
 func (rf *Raft) initParams() {
@@ -661,7 +683,7 @@ func (rf *Raft) broadcastLog() {
 					}
 				}
 
-				rf.DPrintf("raft %v send append log to raft %v, my logindex:%v, his next index:%v, prev index:%v, term:%v", rf.me, i, rf.logIndex, rf.nextIndex[svr], args.PrevLogIndex, args.PrevLogTerm)
+				rf.DPrintf("raft %v send append log to raft %v, my logindex:%v, his next index:%v, prev index:%v, term:%v", rf.me, svr, rf.logIndex, rf.nextIndex[svr], args.PrevLogIndex, args.PrevLogTerm)
 				reply := &AppendEntriesReply{}
 				rf.sendAppendEntries(svr, args, reply)
 			}(i)
