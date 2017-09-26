@@ -188,7 +188,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
 	//更新时间戳
-	rf.recvHeartBeatTime = getMillisTime()
+//	rf.recvHeartBeatTime = getMillisTime()
 
 	rf.DPrintf("raft %v receive request vote from raft %v, his term:%v,logindex:%v mine term:%v, index:%v. time:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm, rf.logIndex-1, rf.recvHeartBeatTime)
 	//请求投票的term小于自己的，不给它投票
@@ -226,20 +226,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.DPrintf("me:%v, src:%v, his index:%v term:%v  mine:%v %v", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.logIndex-1, myLastLogTerm)
 
-	//args的日志索引小于我的，不投票
-	if args.LastLogIndex < rf.logIndex-1 || args.LastLogTerm < myLastLogTerm {
+	//args的日志term小于我的，不投票
+	if  args.LastLogTerm < myLastLogTerm {
 		reply.VoteGranted = 0
 		reply.Term = rf.currentTerm
-		rf.DPrintf("me:%v, src:%v, his index:%v term:%v is lower than mine:%v %v", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.logIndex-1, myLastLogTerm)
+		rf.DPrintf("me:%v, src:%v, his  term:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogTerm,  myLastLogTerm)
 		return
-	}
-
-	//args的term小于我的，不投票
-	if args.LastLogIndex == rf.logIndex-1 && args.LastLogIndex > 0 {
-		if args.LastLogTerm < rf.log[rf.logIndex-1].Term {
+	} 
+	//args的日志索引小于我的，不投票
+	if args.LastLogTerm == myLastLogTerm {
+		if args.LastLogIndex < rf.logIndex -1 {
 			reply.VoteGranted = 0
 			reply.Term = rf.currentTerm
-			rf.DPrintf("me:%v, src:%v, his term:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogTerm, rf.log[rf.logIndex-1].Term)
+			rf.DPrintf("me:%v, src:%v, his  logindex:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.logIndex - 1)
 			return
 		}
 	}
@@ -719,7 +718,7 @@ func (rf *Raft) commitLog() {
 	}
 
 	rf.commitIndex = maxi
-	rf.DPrintf("leader raft %v commit log index:%v", rf.me, rf.commitIndex)
+	rf.DPrintf("leader raft %v commit log index:%v, mactchindex:%v", rf.me, rf.commitIndex, rf.matchIndex)
 }
 
 func (rf *Raft) commitLogToConfig(index int) {
