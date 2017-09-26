@@ -187,8 +187,13 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
+	rf.mu.Lock()
+	defer func() {
+		rf.mu.Unlock()
+	}()
+
 	//更新时间戳
-//	rf.recvHeartBeatTime = getMillisTime()
+	//	rf.recvHeartBeatTime = getMillisTime()
 
 	rf.DPrintf("raft %v receive request vote from raft %v, his term:%v,logindex:%v mine term:%v, index:%v. time:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm, rf.logIndex-1, rf.recvHeartBeatTime)
 	//请求投票的term小于自己的，不给它投票
@@ -227,18 +232,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.DPrintf("me:%v, src:%v, his index:%v term:%v  mine:%v %v", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.logIndex-1, myLastLogTerm)
 
 	//args的日志term小于我的，不投票
-	if  args.LastLogTerm < myLastLogTerm {
+	if args.LastLogTerm < myLastLogTerm {
 		reply.VoteGranted = 0
 		reply.Term = rf.currentTerm
-		rf.DPrintf("me:%v, src:%v, his  term:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogTerm,  myLastLogTerm)
+		rf.DPrintf("me:%v, src:%v, his  term:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogTerm, myLastLogTerm)
 		return
-	} 
+	}
 	//args的日志索引小于我的，不投票
 	if args.LastLogTerm == myLastLogTerm {
-		if args.LastLogIndex < rf.logIndex -1 {
+		if args.LastLogIndex < rf.logIndex-1 {
 			reply.VoteGranted = 0
 			reply.Term = rf.currentTerm
-			rf.DPrintf("me:%v, src:%v, his  logindex:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.logIndex - 1)
+			rf.DPrintf("me:%v, src:%v, his  logindex:%v is lower than mine:%v", rf.me, args.CandidateId, args.LastLogIndex, rf.logIndex-1)
 			return
 		}
 	}
@@ -252,8 +257,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
 
 	return
-
-	reply.Term = rf.currentTerm
 
 }
 
@@ -290,6 +293,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
+	rf.mu.Lock()
+	defer func() {
+		rf.mu.Unlock()
+	}()
+
 	//已经不是candidate了，可能在等待回复的过程中收到了term更大的请求
 	if rf.state == Follower {
 		rf.DPrintf("raft %v receive vote reply, but I'm not candidate now", rf.me)
@@ -302,6 +310,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if reply.Term > rf.currentTerm {
 			rf.DPrintf("me:%v, src:%v, vote reply's term:%v bigger than me:%v. I'll be follower:%v", rf.me, server, reply.Term, rf.currentTerm)
 			rf.state = Follower
+			rf.currentTerm = reply.Term
 			return ok
 		}
 
@@ -330,7 +339,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
 			rf.initLeader()
-			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v~~~", rf.me, rf.currentTerm, rf.logIndex)
+			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v, voteforme:%v~~~", rf.me, rf.currentTerm, rf.logIndex, rf.votedForMe)
 		}
 
 	}
@@ -342,10 +351,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
+	rf.mu.Lock()
+	defer func() {
+		rf.mu.Unlock()
+	}()
+
 	//收到的reply的term比我的大
 	if reply.Term > rf.currentTerm {
 		rf.DPrintf("me:%v, src:%v, recv append reply. his term:%v is bigger than me:%v. I'll change to follower", rf.me, server, reply.Term, rf.currentTerm)
 		rf.state = Follower
+		rf.currentTerm = reply.Term
+		return ok
 	}
 
 	//follower 应用日志失败了
@@ -425,6 +441,12 @@ func (rf *Raft) applyLogEntries(args *AppendEntries, reply *AppendEntriesReply) 
 
 //处理添加日志请求
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
+
+	rf.mu.Lock()
+	defer func() {
+		rf.mu.Unlock()
+	}()
+
 	//记录收到来自leader的添加日志请求的时间
 	rf.recvHeartBeatTime = getMillisTime()
 
@@ -718,11 +740,7 @@ func (rf *Raft) commitLog() {
 	}
 
 	rf.commitIndex = maxi
-<<<<<<< HEAD
-	rf.DPrintf("leader raft %v commit log index:%v.matchindex:%v", rf.me, rf.commitIndex, rf.matchIndex)
-=======
 	rf.DPrintf("leader raft %v commit log index:%v, mactchindex:%v", rf.me, rf.commitIndex, rf.matchIndex)
->>>>>>> 15367ee6ff2df5677d741f7ace5c232bda2a977f
 }
 
 func (rf *Raft) commitLogToConfig(index int) {
