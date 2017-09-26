@@ -361,6 +361,8 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+
+	fmt.Printf("Test (2B): server %v, %v, %v disconnect...\n", (leader1 + 2) % servers, (leader1 + 3) % servers, (leader1 + 4) % servers)
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
@@ -372,10 +374,12 @@ func TestBackup2B(t *testing.T) {
 
 	time.Sleep(RaftElectionTimeout / 2)
 
+	fmt.Printf("Test (2B): server %v, %v disconnect...\n", (leader1 + 0) % servers, (leader1 + 1) % servers)
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
 
 	// allow other partition to recover
+	fmt.Printf("Test (2B): server %v, %v, %v connect...\n", (leader1 + 2) % servers, (leader1 + 3) % servers, (leader1 + 4) % servers)
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
@@ -391,6 +395,7 @@ func TestBackup2B(t *testing.T) {
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
+	fmt.Printf("Test (2B): server other %v disconnect...\n", other)
 	cfg.disconnect(other)
 
 	// lots more commands that won't commit
@@ -402,8 +407,11 @@ func TestBackup2B(t *testing.T) {
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
+		fmt.Printf("Test (2B): server %v disconnect...\n", i)
 		cfg.disconnect(i)
 	}
+
+	fmt.Printf("Test (2B): server %v, %v, other: %v connect...\n", (leader1 + 0) % servers, (leader1 + 1) % servers, other)
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
@@ -415,6 +423,7 @@ func TestBackup2B(t *testing.T) {
 
 	// now everyone
 	for i := 0; i < servers; i++ {
+		fmt.Printf("Test (2B): server %v connect...\n", i)
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers)
