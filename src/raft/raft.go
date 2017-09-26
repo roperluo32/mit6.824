@@ -719,7 +719,7 @@ func (rf *Raft) commitLog() {
 	}
 
 	rf.commitIndex = maxi
-	rf.DPrintf("leader raft %v commit log index:%v", rf.me, rf.commitIndex)
+	rf.DPrintf("leader raft %v commit log index:%v.matchindex:%v", rf.me, rf.commitIndex, rf.matchIndex)
 }
 
 func (rf *Raft) commitLogToConfig(index int) {
