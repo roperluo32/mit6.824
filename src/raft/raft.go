@@ -196,6 +196,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	rf.recvHeartBeatTime = getMillisTime()
 
 	rf.DPrintf("raft %v receive request vote from raft %v, his term:%v,logindex:%v mine term:%v, index:%v. time:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm, rf.logIndex-1, rf.recvHeartBeatTime)
+	rf.DPrintf("raft %v state:%v,recvHeartBeatTime:%v,heartBeatTimeout:%v, now:%v",rf.me, rf.state,  rf.recvHeartBeatTime, rf.heartBeatTimeout, getMillisTime());
+	
 	//请求投票的term小于自己的，不给它投票
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -340,6 +342,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.state = Leader
 			rf.initLeader()
 			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v, voteforme:%v~~~", rf.me, rf.currentTerm, rf.logIndex, rf.votedForMe)
+			rf.broadcastLog()
 		}
 
 	}
@@ -589,12 +592,13 @@ func (rf *Raft) startCandidate() {
 	if rf.logIndex > 0 {
 		args.LastLogTerm = rf.log[rf.logIndex-1].Term
 	}
-	reply := &RequestVoteReply{}
+	
 	rf.DPrintf("raft %v start send request vote. term:%v", rf.me, rf.currentTerm)
 	for i := range rf.peers {
 		if i != rf.me {
 			//rf.DPrintf("raft %v send request vote to raft %v. term:%v", rf.me, i, rf.currentTerm)
 			go func(svr int) {
+				reply := &RequestVoteReply{}
 				rf.sendRequestVote(svr, args, reply)
 			}(i)
 		}
