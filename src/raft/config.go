@@ -61,7 +61,7 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
 		}
 	})
-	fmt.Printf("Num CPU:%v\n", runtime.NumCPU())
+
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
@@ -199,7 +199,7 @@ func (cfg *config) start1(i int) {
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
 
-				fmt.Printf("configlog of raft %v, %v\n", i, cfg.logs[i])
+				//fmt.Printf("configlog of raft %v, %v\n", i, cfg.logs[i])
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}

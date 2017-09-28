@@ -225,7 +225,6 @@ loop:
 				defer wg.Done()
 				//提交（100， 101， 102， 103， 104）5个值
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
-				fmt.Printf("[2B] coroutine return i:%v, term:%v ok:%v\n", i, term1, ok)
 				if term1 != term {
 					return
 				}
@@ -253,12 +252,9 @@ loop:
 		failed := false
 		cmds := []int{}
 
-		fmt.Printf("[2B] debug print channel len %v\n", len(is))
-
 		//遍历channel中的值
 		for index := range is {
 			cmd := cfg.wait(index, servers, term)
-			fmt.Printf("[TEST2B] index:%v of channel value:%v\n", index, cmd)
 			if ix, ok := cmd.(int); ok {
 				if ix == -1 {
 					// peers have moved on to later terms
@@ -362,7 +358,7 @@ func TestBackup2B(t *testing.T) {
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
 
-	fmt.Printf("serverconn : server %v, %v, %v disconnect...\n", (leader1 + 2) % servers, (leader1 + 3) % servers, (leader1 + 4) % servers)
+	fmt.Printf("serverconn : server %v, %v, %v disconnect...\n", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
@@ -374,12 +370,12 @@ func TestBackup2B(t *testing.T) {
 
 	time.Sleep(RaftElectionTimeout / 2)
 
-	fmt.Printf("serverconn : server %v, %v disconnect...\n", (leader1 + 0) % servers, (leader1 + 1) % servers)
+	fmt.Printf("serverconn : server %v, %v disconnect...\n", (leader1+0)%servers, (leader1+1)%servers)
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
 
 	// allow other partition to recover
-	fmt.Printf("serverconn : server %v, %v, %v connect...\n", (leader1 + 2) % servers, (leader1 + 3) % servers, (leader1 + 4) % servers)
+	fmt.Printf("serverconn : server %v, %v, %v connect...\n", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
@@ -411,7 +407,7 @@ func TestBackup2B(t *testing.T) {
 		cfg.disconnect(i)
 	}
 
-	fmt.Printf("serverconn : server %v, %v, other: %v connect...\n", (leader1 + 0) % servers, (leader1 + 1) % servers, other)
+	fmt.Printf("serverconn : server %v, %v, other: %v connect...\n", (leader1+0)%servers, (leader1+1)%servers, other)
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
@@ -703,6 +699,7 @@ func TestFigure82C(t *testing.T) {
 		}
 
 		if leader != -1 {
+			fmt.Printf("[2C]: leader:%v crash...\n")
 			cfg.crash1(leader)
 			nup -= 1
 		}
@@ -710,6 +707,7 @@ func TestFigure82C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
+				fmt.Printf("[2C]: raft:%v start and connect...\n")
 				cfg.start1(s)
 				cfg.connect(s)
 				nup += 1
@@ -719,6 +717,7 @@ func TestFigure82C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
+			fmt.Printf("[2C]: raft:%v start and connect in for...\n")
 			cfg.start1(i)
 			cfg.connect(i)
 		}

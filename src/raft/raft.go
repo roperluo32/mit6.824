@@ -17,10 +17,12 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
-import "time"
-import "math/rand"
+import (
+	"labrpc"
+	"math/rand"
+	"sync"
+	"time"
+)
 
 // import "bytes"
 // import "encoding/gob"
@@ -95,6 +97,13 @@ type Raft struct {
 	debugSwitch bool
 }
 
+type RaftPersist struct {
+	CurrentTerm int
+	VoteFor     int
+	Log         [10000]logEntry
+	LogIndex    int
+}
+
 //添加日志/心跳包结构体
 type AppendEntries struct {
 	Term         int
@@ -106,8 +115,8 @@ type AppendEntries struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success int
+	Term     int
+	Success  int
 	LogIndex int
 }
 
@@ -139,6 +148,20 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	/*
+		var p RaftPersist
+		p.CurrentTerm = rf.currentTerm
+		p.VoteFor = rf.voteFor
+		for i := 0; i < rf.logIndex; i++ {
+			p.Log[i] = rf.log[i]
+		}
+		p.LogIndex = rf.logIndex
+		w := new(bytes.Buffer)
+		e := gob.NewEncoder(w)
+		e.Encode(p)
+		data := w.Bytes()
+		rf.persister.SaveRaftState(data)
+	*/
 }
 
 //
@@ -155,6 +178,22 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	/*
+		var p RaftPersist
+		r := bytes.NewBuffer(data)
+		d := gob.NewDecoder(r)
+		d.Decode(&p)
+
+		rf.currentTerm = p.CurrentTerm
+		rf.voteFor = p.VoteFor
+
+		rf.DPrintf("raft:%v read persist:%v", rf.me, p)
+
+		for i := 0; i < p.LogIndex; i++ {
+			rf.log[i] = p.Log[i]
+		}
+		rf.logIndex = p.LogIndex
+	*/
 }
 
 //
@@ -197,8 +236,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//	rf.recvHeartBeatTime = getMillisTime()
 
 	rf.DPrintf("raft %v receive request vote from raft %v, his term:%v,logindex:%v mine term:%v, index:%v. time:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm, rf.logIndex-1, rf.recvHeartBeatTime)
-	rf.DPrintf("raft %v state:%v,recvHeartBeatTime:%v,heartBeatTimeout:%v, now:%v",rf.me, rf.state,  rf.recvHeartBeatTime, rf.heartBeatTimeout, getMillisTime());
-	
+	rf.DPrintf("raft %v state:%v,recvHeartBeatTime:%v,heartBeatTimeout:%v, now:%v", rf.me, rf.state, rf.recvHeartBeatTime, rf.heartBeatTimeout, getMillisTime())
+
 	//请求投票的term小于自己的，不给它投票
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -225,6 +264,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//转为follower
 		rf.state = Follower
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	myLastLogTerm := -1
@@ -297,6 +337,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
+	if ok == false {
+		rf.DPrintf("raft %v sendRequestVote to raft %v fail. May be network not well.", rf.me, server)
+		return ok
+	}
+
 	rf.mu.Lock()
 	defer func() {
 		rf.mu.Unlock()
@@ -315,6 +360,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.DPrintf("me:%v, src:%v, vote reply's term:%v bigger than me:%v. I'll be follower:%v", rf.me, server, reply.Term, rf.currentTerm)
 			rf.state = Follower
 			rf.currentTerm = reply.Term
+			rf.persist()
 			return ok
 		}
 
@@ -343,6 +389,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if count >= len(rf.peers)/2+1 {
 			rf.state = Leader
 			rf.initLeader()
+			rf.persist()
 			rf.DPrintf("me:%v,I'll be LEADER term:%v, logindex:%v, voteforme:%v~~~", rf.me, rf.currentTerm, rf.logIndex, rf.votedForMe)
 			rf.broadcastLog()
 		}
@@ -356,6 +403,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
+	if ok == false {
+		rf.DPrintf("raft %v sendAppendEntries to raft %v fail. May be network not well.", rf.me, server)
+		return ok
+	}
+
 	rf.mu.Lock()
 	defer func() {
 		rf.mu.Unlock()
@@ -366,6 +418,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 		rf.DPrintf("me:%v, src:%v, recv append reply. his term:%v is bigger than me:%v. I'll change to follower", rf.me, server, reply.Term, rf.currentTerm)
 		rf.state = Follower
 		rf.currentTerm = reply.Term
+		rf.persist()
 		return ok
 	}
 
@@ -375,10 +428,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 		if rf.nextIndex[server] > 0 {
 			if reply.LogIndex >= 0 {
 				rf.nextIndex[server] = reply.LogIndex
-			} else{
+			} else {
 				rf.nextIndex[server]--
 			}
-			
+
 		}
 	} else {
 		for i := range args.Entries {
@@ -409,18 +462,18 @@ func getMillisTime() int64 {
 	return millis
 }
 
-func (rf *Raft) foundFirstNotSameTerm (index int) int {
+func (rf *Raft) foundFirstNotSameTerm(index int) int {
 	if index < 0 {
 		return -1
 	}
 	term := rf.log[index].Term
-	
-	index --
+
+	index--
 	for index >= 0 {
 		if rf.log[index].Term != term {
 			return index
 		}
-		index --
+		index--
 	}
 
 	return -1
@@ -488,7 +541,7 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 		rf.DPrintf("me:%v, src:%v, AppendEntries his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Success = 0
 		reply.Term = rf.currentTerm
-		
+
 		return
 	}
 
@@ -511,6 +564,7 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.applyLogEntries(args, reply)
 
 	reply.Term = rf.currentTerm
+	rf.persist()
 }
 
 //
@@ -550,6 +604,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		logidx := rf.logIndex
 		tm := rf.currentTerm
 		rf.mu.Unlock()
+
+		rf.persist()
 
 		return logidx, tm, true
 	}
@@ -620,7 +676,7 @@ func (rf *Raft) startCandidate() {
 	if rf.logIndex > 0 {
 		args.LastLogTerm = rf.log[rf.logIndex-1].Term
 	}
-	
+
 	rf.DPrintf("raft %v start send request vote. term:%v", rf.me, rf.currentTerm)
 	for i := range rf.peers {
 		if i != rf.me {
@@ -634,6 +690,8 @@ func (rf *Raft) startCandidate() {
 			}(i)
 		}
 	}
+
+	rf.persist()
 }
 
 //获取心跳超时和选举超时时间，设置为150～300ms中的一个随机数
