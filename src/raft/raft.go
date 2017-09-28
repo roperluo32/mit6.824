@@ -108,6 +108,7 @@ type AppendEntries struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success int
+	LogIndex int
 }
 
 // return currentTerm and whether this server
@@ -255,6 +256,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.voteFor = args.CandidateId
 	reply.Term = rf.currentTerm
 	rf.state = Follower //给别人投票了，就变为follower
+	rf.recvHeartBeatTime = getMillisTime()
 
 	rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
 
@@ -369,9 +371,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 
 	//follower 应用日志失败了
 	if reply.Success == 0 {
-		rf.DPrintf("raft %v send log to raft %v failed.", rf.me, server)
+		rf.DPrintf("raft %v send log to raft %v failed.nextIndex:%v from him", rf.me, server, reply.LogIndex)
 		if rf.nextIndex[server] > 0 {
-			rf.nextIndex[server]--
+			if reply.LogIndex >= 0 {
+				rf.nextIndex[server] = reply.LogIndex
+			} else{
+				rf.nextIndex[server]--
+			}
+			
 		}
 	} else {
 		for i := range args.Entries {
@@ -402,12 +409,30 @@ func getMillisTime() int64 {
 	return millis
 }
 
+func (rf *Raft) foundFirstNotSameTerm (index int) int {
+	if index < 0 {
+		return -1
+	}
+	term := rf.log[index].Term
+	
+	index --
+	for index >= 0 {
+		if rf.log[index].Term != term {
+			return index
+		}
+		index --
+	}
+
+	return -1
+}
+
 //将leader的日志应用的本机
 func (rf *Raft) applyLogEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	//我的日志比leader的previndex还小
 	if args.PrevLogIndex >= rf.logIndex {
 		rf.DPrintf("raft %v apply log and find mine logindex:%v is lower than previndex:%v", rf.me, rf.logIndex, args.PrevLogIndex)
 		reply.Success = 0
+		reply.LogIndex = rf.logIndex
 		return
 	}
 
@@ -416,6 +441,7 @@ func (rf *Raft) applyLogEntries(args *AppendEntries, reply *AppendEntriesReply) 
 		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			rf.DPrintf("raft %v apply log and find my term:%v is not equal to prev term:%v", rf.me, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
 			reply.Success = 0
+			reply.LogIndex = rf.foundFirstNotSameTerm(args.PrevLogIndex) + 1
 			return
 		}
 	}
@@ -455,12 +481,14 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 
 	rf.DPrintf("raft %v receive append log request from raft %v.his term:%v, my term:%v, args:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm, args)
 	reply.Success = 1
+	reply.LogIndex = -1
 
 	//leader的term比自己还小
 	if args.Term < rf.currentTerm {
 		rf.DPrintf("me:%v, src:%v, AppendEntries his term:%v is lower than me:%v", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Success = 0
 		reply.Term = rf.currentTerm
+		
 		return
 	}
 
@@ -599,6 +627,9 @@ func (rf *Raft) startCandidate() {
 			//rf.DPrintf("raft %v send request vote to raft %v. term:%v", rf.me, i, rf.currentTerm)
 			go func(svr int) {
 				reply := &RequestVoteReply{}
+				if rf.state != Candidate {
+					return
+				}
 				rf.sendRequestVote(svr, args, reply)
 			}(i)
 		}
@@ -710,6 +741,10 @@ func (rf *Raft) broadcastLog() {
 
 				rf.DPrintf("raft %v send append log to raft %v, my logindex:%v, his next index:%v, prev index:%v, term:%v", rf.me, svr, rf.logIndex, rf.nextIndex[svr], args.PrevLogIndex, args.PrevLogTerm)
 				reply := &AppendEntriesReply{}
+
+				if rf.state != Leader {
+					return
+				}
 				rf.sendAppendEntries(svr, args, reply)
 			}(i)
 		}
