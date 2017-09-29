@@ -699,7 +699,7 @@ func TestFigure82C(t *testing.T) {
 		}
 
 		if leader != -1 {
-			fmt.Printf("[2C]: leader:%v crash...\n")
+			fmt.Printf("[2C]: leader:%v crash...\n", leader)
 			cfg.crash1(leader)
 			nup -= 1
 		}
@@ -707,7 +707,7 @@ func TestFigure82C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
-				fmt.Printf("[2C]: raft:%v start and connect...\n")
+				fmt.Printf("[2C]: raft:%v start and connect...\n", s)
 				cfg.start1(s)
 				cfg.connect(s)
 				nup += 1
@@ -717,7 +717,7 @@ func TestFigure82C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
-			fmt.Printf("[2C]: raft:%v start and connect in for...\n")
+			fmt.Printf("[2C]: raft:%v start and connect in for...\n", i)
 			cfg.start1(i)
 			cfg.connect(i)
 		}

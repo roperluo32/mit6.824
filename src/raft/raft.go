@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -148,20 +150,20 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	/*
-		var p RaftPersist
-		p.CurrentTerm = rf.currentTerm
-		p.VoteFor = rf.voteFor
-		for i := 0; i < rf.logIndex; i++ {
-			p.Log[i] = rf.log[i]
-		}
-		p.LogIndex = rf.logIndex
-		w := new(bytes.Buffer)
-		e := gob.NewEncoder(w)
-		e.Encode(p)
-		data := w.Bytes()
-		rf.persister.SaveRaftState(data)
-	*/
+
+	var p RaftPersist
+	p.CurrentTerm = rf.currentTerm
+	p.VoteFor = rf.voteFor
+	for i := 0; i < rf.logIndex; i++ {
+		p.Log[i] = rf.log[i]
+	}
+	p.LogIndex = rf.logIndex
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(p)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+
 }
 
 //
@@ -178,22 +180,22 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	/*
-		var p RaftPersist
-		r := bytes.NewBuffer(data)
-		d := gob.NewDecoder(r)
-		d.Decode(&p)
 
-		rf.currentTerm = p.CurrentTerm
-		rf.voteFor = p.VoteFor
+	var p RaftPersist
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&p)
 
-		rf.DPrintf("raft:%v read persist:%v", rf.me, p)
+	rf.currentTerm = p.CurrentTerm
+	rf.voteFor = p.VoteFor
 
-		for i := 0; i < p.LogIndex; i++ {
-			rf.log[i] = p.Log[i]
-		}
-		rf.logIndex = p.LogIndex
-	*/
+	rf.DPrintf("raft:%v read persist:%v", rf.me, p)
+
+	for i := 0; i < p.LogIndex; i++ {
+		rf.log[i] = p.Log[i]
+	}
+	rf.logIndex = p.LogIndex
+
 }
 
 //
@@ -297,6 +299,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	rf.state = Follower //给别人投票了，就变为follower
 	rf.recvHeartBeatTime = getMillisTime()
+	rf.persist()
 
 	rf.DPrintf("raft %v vote for him:%v", rf.me, args.CandidateId)
 
@@ -375,6 +378,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.votedForMe[server] = 1
 		}
 
+		if rf.state == Leader {
+			rf.DPrintf("raft %v receive vote reply and I'm already a Leader ~~~~")
+			return ok
+		}
+
 		//计算目前的得票数是否超过了半数
 		count := 0
 		for i := range rf.votedForMe {
@@ -434,11 +442,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 
 		}
 	} else {
+		nStep := 0
 		for i := range args.Entries {
 			if args.Entries[i].Term >= 0 {
-				rf.nextIndex[server]++
+				nStep++
 			}
 		}
+		rf.nextIndex[server] = args.PrevLogIndex + 1 + nStep
+
 		//更新已经和server匹配的日志索引
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 
