@@ -379,7 +379,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		}
 
 		if rf.state == Leader {
-			rf.DPrintf("raft %v receive vote reply and I'm already a Leader ~~~~")
+			rf.DPrintf("raft %v receive vote reply and I'm already a Leader ~~~~", rf.me)
 			return ok
 		}
 
@@ -448,7 +448,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 				nStep++
 			}
 		}
-		rf.nextIndex[server] = args.PrevLogIndex + 1 + nStep
+		nIdx := args.PrevLogIndex + 1 + nStep
+		if nIdx < rf.nextIndex[server] {
+			rf.DPrintf("raft %v maybe recv a old send log reply.nIdx:%v, args:%v.myindex:%v, his nextindex:%v", rf.me, nIdx, args, rf.logIndex, rf.nextIndex)
+			return ok
+		}
 
 		//更新已经和server匹配的日志索引
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
@@ -856,7 +860,7 @@ func (rf *Raft) commitLogToConfig(index int) {
 	apply.Index = index + 1
 	apply.Command = rf.log[index].Value
 
-	rf.DPrintf("raft %v commit log(index:%v, value:%v) to config.", rf.me, apply.Index, apply.Command)
+	rf.DPrintf("raft %v commit log(index:<%v+1>, value:%v) to config.", rf.me, index, apply.Command)
 
 	rf.applyCh <- apply
 }
