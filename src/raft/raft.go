@@ -112,7 +112,7 @@ type AppendEntries struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      [5]logEntry //保存发给follower的日志条目，心跳包为0, 一次最多发5条
+	Entries      [100]logEntry //保存发给follower的日志条目，心跳包为0, 一次最多发5条
 	LeaderCommit int
 }
 
@@ -448,10 +448,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 				nStep++
 			}
 		}
+
 		nIdx := args.PrevLogIndex + 1 + nStep
+
 		if nIdx < rf.nextIndex[server] {
-			rf.DPrintf("raft %v maybe recv a old send log reply.nIdx:%v, args:%v.myindex:%v, his nextindex:%v", rf.me, nIdx, args, rf.logIndex, rf.nextIndex)
+			rf.DPrintf("[WARN] raft %v maybe recv a old send log reply.nIdx:%v, args:%v.myindex:%v, his nextindex:%v", rf.me, nIdx, args, rf.logIndex, rf.nextIndex)
 			return ok
+		}else{
+			rf.nextIndex[server] = nIdx
 		}
 
 		//更新已经和server匹配的日志索引
@@ -717,6 +721,7 @@ func (rf *Raft) getRandWaitTime() int {
 func (rf *Raft) initLeader() {
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = rf.logIndex
+		rf.matchIndex[i] = -1
 	}
 }
 
@@ -842,12 +847,18 @@ func (rf *Raft) commitLog() {
 		}
 	}
 
-	if rf.commitIndex > maxi {
+	if rf.commitIndex >= maxi {
 		rf.DPrintf("[WARN] leader raft %v commit log. my commitindex:%v is bigger than compute index:%v", rf.me, rf.commitIndex, maxi)
 		//	panic("[ERROR] commit log error")
+		return
 	}
 
-	if maxi < 0 {
+	if maxi < 0 || maxi >= rf.logIndex{
+		rf.DPrintf("[WARN] leader raft %v commit log. maxi:%v is illeagal", rf.me, maxi)
+		return
+	}
+
+	if rf.log[maxi].Term != rf.currentTerm {
 		return
 	}
 

@@ -142,6 +142,7 @@ func (cfg *config) crash1(i int) {
 // this server. since we cannot really kill it.
 //
 func (cfg *config) start1(i int) {
+	//fmt.Printf("raft %d RESTART.............\n", i)
 	//先删除旧的raft
 	cfg.crash1(i)
 
@@ -199,7 +200,7 @@ func (cfg *config) start1(i int) {
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
 
-				fmt.Printf("configlog of raft %v, %v\n", i, cfg.logs[i])
+				
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
@@ -208,6 +209,7 @@ func (cfg *config) start1(i int) {
 			}
 
 			if err_msg != "" {
+				fmt.Printf("configlog:%v \n", cfg.logs)
 				log.Fatalf("apply error: %v\n", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -244,7 +246,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
+	 //fmt.Printf("raft %d CONNECT.........\n", i)
 
 	cfg.connected[i] = true
 
@@ -267,7 +269,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
+	// fmt.Printf("raft %d DISCONNECT..........\n", i)
 
 	cfg.connected[i] = false
 
