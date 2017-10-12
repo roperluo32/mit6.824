@@ -32,12 +32,18 @@ func random_handles(kvh []*labrpc.ClientEnd) []*labrpc.ClientEnd {
 }
 
 type config struct {
-	mu           sync.Mutex
-	t            *testing.T
-	tag          string
-	net          *labrpc.Network
-	n            int
-	kvservers    []*RaftKV
+	mu sync.Mutex
+	t  *testing.T
+	//测试的名字，用作输出标志符
+	tag string
+
+	//网络收发结构体
+	net *labrpc.Network
+
+	//server的个数
+	n         int
+	kvservers []*RaftKV
+	//n个server对应的raft的persister存储
 	saved        []*raft.Persister
 	endnames     [][]string // names of each server's sending ClientEnds
 	clerks       map[*Clerk][]string
@@ -341,11 +347,14 @@ func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate 
 		}
 	})
 	runtime.GOMAXPROCS(4)
+
+	//创建config结构体
 	cfg := &config{}
 	cfg.t = t
 	cfg.tag = tag
 	cfg.net = labrpc.MakeNetwork()
 	cfg.n = n
+	//创建n个server结构体raftKV
 	cfg.kvservers = make([]*RaftKV, cfg.n)
 	cfg.saved = make([]*raft.Persister, cfg.n)
 	cfg.endnames = make([][]string, cfg.n)
@@ -354,6 +363,7 @@ func make_config(t *testing.T, tag string, n int, unreliable bool, maxraftstate 
 	cfg.maxraftstate = maxraftstate
 
 	// create a full set of KV servers.
+	//启动n个server
 	for i := 0; i < cfg.n; i++ {
 		cfg.StartServer(i)
 	}

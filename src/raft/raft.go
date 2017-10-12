@@ -43,7 +43,7 @@ type ApplyMsg struct {
 
 type logEntry struct {
 	Term  int
-	Value int
+	Value interface{}
 }
 
 type State int
@@ -454,7 +454,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 		if nIdx < rf.nextIndex[server] {
 			rf.DPrintf("[WARN] raft %v maybe recv a old send log reply.nIdx:%v, args:%v.myindex:%v, his nextindex:%v", rf.me, nIdx, args, rf.logIndex, rf.nextIndex)
 			return ok
-		}else{
+		} else {
 			rf.nextIndex[server] = nIdx
 		}
 
@@ -853,7 +853,7 @@ func (rf *Raft) commitLog() {
 		return
 	}
 
-	if maxi < 0 || maxi >= rf.logIndex{
+	if maxi < 0 || maxi >= rf.logIndex {
 		rf.DPrintf("[WARN] leader raft %v commit log. maxi:%v is illeagal", rf.me, maxi)
 		return
 	}
@@ -874,6 +874,10 @@ func (rf *Raft) commitLogToConfig(index int) {
 	rf.DPrintf("raft %v commit log(index:<%v+1>, value:%v) to config.", rf.me, index, apply.Command)
 
 	rf.applyCh <- apply
+}
+
+func (rf *Raft) IsLeader() bool {
+	return rf.state == Leader
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
