@@ -610,11 +610,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, rf.currentTerm, false
 	}
 
-	if cmd, ok := command.(int); ok {
+	if true { //cmd, ok := command.(int); ok {
 		rf.mu.Lock()
 		loge := logEntry{}
 		loge.Term = rf.currentTerm
-		loge.Value = cmd
+		loge.Value = command
 		rf.log[rf.logIndex] = loge
 		rf.logIndex++
 		rf.nextIndex[rf.me] = rf.logIndex
@@ -870,6 +870,7 @@ func (rf *Raft) commitLogToConfig(index int) {
 	var apply ApplyMsg
 	apply.Index = index + 1
 	apply.Command = rf.log[index].Value
+	apply.UseSnapshot = false
 
 	rf.DPrintf("raft %v commit log(index:<%v+1>, value:%v) to config.", rf.me, index, apply.Command)
 

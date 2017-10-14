@@ -132,11 +132,13 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 	cfg := make_config(t, tag, nservers, unreliable, maxraftstate)
 	defer cfg.cleanup()
 
+	//创建nclients个client
 	ck := cfg.makeClient(cfg.All())
 
 	done_partitioner := int32(0)
 	done_clients := int32(0)
 	ch_partitioner := make(chan bool)
+
 	clnts := make([]chan int, nclients)
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int)

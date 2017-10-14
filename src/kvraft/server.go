@@ -6,14 +6,17 @@ import (
 	"labrpc"
 	"log"
 	"raft"
+	"strconv"
 	"sync"
+	"time"
 )
 
 const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
-		log.Printf(format, a...)
+		format = format + "\n"
+		fmt.Printf(format, a...)
 	}
 	return
 }
@@ -22,11 +25,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-}
-
-type LogItem struct {
 	Key   string
 	Value string
+	Op    string
+
+	Seq uint64
 }
 
 type RaftKV struct {
@@ -39,54 +42,132 @@ type RaftKV struct {
 
 	// Your definitions here.
 	//raft提交的日志
-	logs   map[int]LogItem   // copy of raft's committed entries
+	logs   map[int]Op        // copy of raft's committed entries
 	maplog map[string]string //用map形式存储的kv形式日志，方便查询和更改
+	mapch  map[int]chan int  //当位于index的日志提交时，就往对应的channel放入对应日志的term，以通知相关的协程，比如append
+
+	mapseq map[uint64]int //保存提交日志的seq，用来去重
+
+	debugSwitch bool
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	reply.WrongLeader = false
+	reply.Seq = args.Seq
+	reply.Server = kv.me
+
+	kv.DPrintf("[Get], Receive get req:%v, key:%v, seq:%v", args, args.Key, args.Seq)
 
 	//我不是leader
 	if kv.rf.IsLeader() == false {
 		reply.WrongLeader = true
 		reply.Err = "I'm not Leader"
+		kv.DPrintf("[Get], NOT Leader. args:%v", args)
 		return
 	}
+
+	kv.DPrintf("[Get] theleader start to process req")
 
 	v, ok := kv.maplog[args.Key]
 	//key不存在或者还没有提交
 	if ok == false {
 		reply.Err = "Key is not exist."
+		kv.DPrintf("[Get], Key is not exist. args:%v", args)
 		return
 	}
 
 	reply.Value = v
 	reply.Err = ""
 
+	kv.DPrintf("[Get], Get Success. args:%v, reply:%v", args, reply)
 	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	reply.WrongLeader = false
 
-	value := LogItem{args.Key, args.Value}
+	reply.WrongLeader = false
+	reply.Seq = args.Seq
+	reply.Server = kv.me
+
+	//检查seq是否提交过
+	_, ok := kv.mapseq[args.Seq]
+	if ok {
+		kv.DPrintf("[PutAppend] Receive req...But seq:%v has existed...", args.Seq)
+		reply.Err = "Err: Seq has duplicated.."
+	}
+
+	value := Op{args.Key, args.Value, args.Op, args.Seq}
+
+	kv.DPrintf("[PutAppend] Receive req... args:%v, key:%s, value:%s, Op:%v, seq:%v", args, args.Key, args.Value, value, args.Seq)
+
 	index, term, isLeader := kv.rf.Start(value)
 
 	if isLeader == false {
 		reply.WrongLeader = true
-		reply.Err = "I'm not Leader"
+		prefix := "I'm not Leader. server: "
+		reply.Err = Err(prefix + strconv.Itoa(kv.me))
+		kv.DPrintf("[PutAppend], Not Leader. args:%v", args)
 		return
 	}
+
+	kv.DPrintf("[PutAppend] theleader start to process req")
 
 	if index < 0 || term < 0 {
 		reply.Err = "Add log to raft fail."
+		kv.DPrintf("[PutAppend] Add log to raft fail. index:%v, term:%v, args:%v", index, term, args)
 		return
 	}
 
-	reply.Err = ""
+	//监听index对应的channel，以确定log是否提交
+	_, ok = kv.mapch[index]
+	if ok == false {
+		kv.mapch[index] = make(chan int, 1)
+	}
+	notifych := kv.mapch[index]
 
+	//轮询检查
+	for {
+		time.Sleep(20 * time.Millisecond)
+
+		//日志已经提交
+		if len(notifych) > 0 {
+			_ = <-notifych
+
+			reply.Err = ""
+			reply.WrongLeader = false
+
+			kv.DPrintf("[PutAppend] req commit ok. index:%v, term:%v. reply:%v", index, term, reply)
+			return
+		}
+
+		//leader关系检查
+		t, leader := kv.rf.GetState()
+		if t != term || leader == false {
+			reply.Err = "I'm not Leader when commit log"
+			kv.DPrintf("[PutAppend], I'm not Leader when commit log. index:%v, term:%v", index, term)
+			reply.WrongLeader = true
+			return
+		}
+	}
+
+	return
+}
+
+func (kv *RaftKV) DPrintf(format string, a ...interface{}) (n int, err error) {
+	if kv.debugSwitch == false {
+		return
+	}
+
+	format = "[kv:%v] " + format
+	b := make([]interface{}, 0)
+	b = append(b, kv.me)
+	for i := range a {
+		b = append(b, a[i])
+	}
+
+	DPrintf(format, b...)
 	return
 }
 
@@ -99,6 +180,53 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+
+	kv.debugSwitch = false
+}
+
+func (kv *RaftKV) applyLog(m raft.ApplyMsg, v Op) string {
+
+	err_msg := ""
+
+	//检查日志index是否合法
+	_, prevok := kv.logs[m.Index-1]
+	if m.Index > 1 && prevok == false {
+		err_msg = fmt.Sprintf("server %v apply out of order %v", kv.me, m.Index)
+	}
+
+	//将提交的日志的值保存到数据库中，目前用map来保存
+	kv.logs[m.Index] = v
+
+	switch v.Op {
+	case "Put":
+		kv.maplog[v.Key] = v.Value
+	case "Append":
+		_, ok := kv.maplog[v.Key]
+		if ok {
+			//key对应的值存在，那么追加到后面
+			kv.maplog[v.Key] = kv.maplog[v.Key] + v.Value
+		} else {
+			//key对应的值不存在，那么就直接赋值
+			kv.maplog[v.Key] = v.Value
+		}
+	}
+
+	//向监听index对应的channel中放入1，以通知Get日志已经提交
+	_, ok := kv.mapch[m.Index]
+	if ok == false {
+		kv.mapch[m.Index] = make(chan int, 1)
+	}
+	kv.mapch[m.Index] <- 1
+
+	//检查提交的日志是否已经提交过
+	_, ok = kv.mapseq[v.Seq]
+	if ok == true {
+		//已经提交过
+		err_msg = fmt.Sprintf("server %v apply seq:%v has commited.OP:%v", kv.me, v.Seq, v)
+	}
+	kv.mapseq[v.Seq] = 1
+
+	return err_msg
 }
 
 //
@@ -128,24 +256,28 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.debugSwitch = true
+	kv.logs = make(map[int]Op)
+	kv.maplog = make(map[string]string)
+	kv.mapch = make(map[int]chan int)
+	kv.mapseq = make(map[uint64]int)
+
 	// You may need initialization code here.
 	go func(me int) {
 		for m := range kv.applyCh {
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
-			} else if v, ok := (m.Command).(LogItem); ok {
+			} else if v, ok := (m.Command).(Op); ok {
 				kv.mu.Lock()
-				_, prevok := kv.logs[m.Index-1]
-				kv.logs[m.Index] = v
-				kv.maplog[v.Key] = v.Value
+
+				//将raft提交的日志应用到数据库中
+				err_msg = kv.applyLog(m, v)
+
 				kv.mu.Unlock()
 
-				if m.Index > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", me, m.Index)
-				}
 			} else {
-				err_msg = fmt.Sprintf("committed command %v is not an LogItem", m.Command)
+				err_msg = fmt.Sprintf("committed command %v is not an Op", m.Command)
 			}
 
 			if err_msg != "" {

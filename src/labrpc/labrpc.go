@@ -50,14 +50,16 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "encoding/gob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
+import (
+	"bytes"
+	"encoding/gob"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"time"
+)
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -104,6 +106,8 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		rd := gob.NewDecoder(rb)
 		if err := rd.Decode(reply); err != nil {
 			log.Fatalf("ClientEnd.Call(): decode reply: %v\n", err)
+		} else {
+			//fmt.Printf("ClientEnd.Call() decode reply success. reply:%v\n", reply)
 		}
 		return true
 	} else {
@@ -243,7 +247,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 			case reply = <-ech:
 				replyOK = true
 			case <-time.After(100 * time.Millisecond):
-				log.Println("ProcessReq, timeout")
+				//log.Println("ProcessReq, timeout")
 				serverDead = rn.IsServerDead(req.endname, servername, server)
 			}
 		}
@@ -330,7 +334,7 @@ func (rn *Network) DeleteServer(servername interface{}) {
 
 // connect a ClientEnd to a server.
 // a ClientEnd can only be connected once in its lifetime.
-//记录连接名字对应的接受者的raft索引
+//记录连接名字对应的接受者的server索引
 func (rn *Network) Connect(endname interface{}, servername interface{}) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -339,6 +343,7 @@ func (rn *Network) Connect(endname interface{}, servername interface{}) {
 }
 
 // enable/disable a ClientEnd.
+//将某条连接endpoint设置为可用/不可用
 func (rn *Network) Enable(endname interface{}, enabled bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()

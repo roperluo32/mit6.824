@@ -21,6 +21,7 @@ func randstring(n int) string {
 }
 
 // Randomize server handles
+//打乱保存server连接数组的顺序，应该是方便后面以一种随机的顺序访问
 func random_handles(kvh []*labrpc.ClientEnd) []*labrpc.ClientEnd {
 	sa := make([]*labrpc.ClientEnd, len(kvh))
 	copy(sa, kvh)
@@ -44,8 +45,10 @@ type config struct {
 	n         int
 	kvservers []*RaftKV
 	//n个server对应的raft的persister存储
-	saved        []*raft.Persister
-	endnames     [][]string // names of each server's sending ClientEnds
+	saved    []*raft.Persister
+	endnames [][]string // names of each server's sending ClientEnds
+
+	//记录每个客户端的endpoints连接
 	clerks       map[*Clerk][]string
 	nextClientId int
 	maxraftstate int
@@ -137,6 +140,7 @@ func (cfg *config) disconnect(i int, from []int) {
 	cfg.disconnectUnlocked(i, from)
 }
 
+//返回一个大小为cfg.n的int数组
 func (cfg *config) All() []int {
 	all := make([]int, cfg.n)
 	for i := 0; i < cfg.n; i++ {
@@ -176,6 +180,7 @@ func (cfg *config) makeClient(to []int) *Clerk {
 	defer cfg.mu.Unlock()
 
 	// a fresh set of ClientEnds.
+	//客户端到n个server的连接
 	ends := make([]*labrpc.ClientEnd, cfg.n)
 	endnames := make([]string, cfg.n)
 	for j := 0; j < cfg.n; j++ {
@@ -184,7 +189,7 @@ func (cfg *config) makeClient(to []int) *Clerk {
 		cfg.net.Connect(endnames[j], j)
 	}
 
-	ck := MakeClerk(random_handles(ends))
+	ck := MakeClerk(ends) //random_handles(ends))
 	cfg.clerks[ck] = endnames
 	cfg.nextClientId++
 	cfg.ConnectClientUnlocked(ck, to)
