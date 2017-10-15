@@ -29,7 +29,14 @@ type Op struct {
 	Value string
 	Op    string
 
-	Seq uint64
+	Seq    uint64
+	Server int
+}
+
+type ReqLogInfo struct {
+	Server int
+	Index  int
+	Term   int
 }
 
 type RaftKV struct {
@@ -46,7 +53,7 @@ type RaftKV struct {
 	maplog map[string]string //用map形式存储的kv形式日志，方便查询和更改
 	mapch  map[int]chan int  //当位于index的日志提交时，就往对应的channel放入对应日志的term，以通知相关的协程，比如append
 
-	mapseq map[uint64]int //保存提交日志的seq，用来去重
+	mapseq map[uint64]ReqLogInfo //保存提交日志的seq，用来去重
 
 	debugSwitch bool
 }
@@ -98,7 +105,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = "Err: Seq has duplicated.."
 	}
 
-	value := Op{args.Key, args.Value, args.Op, args.Seq}
+	value := Op{args.Key, args.Value, args.Op, args.Seq, kv.me}
 
 	kv.DPrintf("[PutAppend] Receive req... args:%v, key:%s, value:%s, Op:%v, seq:%v", args, args.Key, args.Value, value, args.Seq)
 
@@ -222,9 +229,11 @@ func (kv *RaftKV) applyLog(m raft.ApplyMsg, v Op) string {
 	_, ok = kv.mapseq[v.Seq]
 	if ok == true {
 		//已经提交过
-		err_msg = fmt.Sprintf("server %v apply seq:%v has commited.OP:%v", kv.me, v.Seq, v)
+		err_msg = fmt.Sprintf("server %v apply seq:%v has commited.prev commit server:%v index:%v, now commit server:%v index:%v, OP:%v",
+			kv.me, v.Seq, kv.mapseq[v.Seq].Server, kv.mapseq[v.Seq].Index, v.Server, m.Index, v)
 	}
-	kv.mapseq[v.Seq] = 1
+	loginfo := ReqLogInfo{Server: v.Server, Index: m.Index}
+	kv.mapseq[v.Seq] = loginfo
 
 	return err_msg
 }
@@ -260,7 +269,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.logs = make(map[int]Op)
 	kv.maplog = make(map[string]string)
 	kv.mapch = make(map[int]chan int)
-	kv.mapseq = make(map[uint64]int)
+	kv.mapseq = make(map[uint64]ReqLogInfo)
 
 	// You may need initialization code here.
 	go func(me int) {
