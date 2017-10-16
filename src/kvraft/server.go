@@ -53,7 +53,8 @@ type RaftKV struct {
 	maplog map[string]string //用map形式存储的kv形式日志，方便查询和更改
 	mapch  map[int]chan int  //当位于index的日志提交时，就往对应的channel放入对应日志的term，以通知相关的协程，比如append
 
-	mapseq map[uint64]ReqLogInfo //保存提交日志的seq，用来去重
+	mapseqcommited map[uint64]ReqLogInfo //保存提交日志的seq，用来去重
+	mapseqreqqed   map[uint64]ReqLogInfo //保存addAppend请求的日志seq，用来去重
 
 	debugSwitch bool
 }
@@ -91,6 +92,54 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	return
 }
 
+//1,返回true，说明是重复日志，丢弃
+//2， 返回false，说明没有提交过或者提交过但是已经失效了，可以继续提交
+func (kv *RaftKV) checkDupReq(seq uint64) bool {
+	//1，是否已经提交过了（检查终点）
+	_, ok := kv.mapseqcommited[seq]
+	if ok {
+		kv.DPrintf("[PutAppend] checkDupReq....But seq:%v has commited...", seq)
+		return true
+	}
+
+	//2,是否有请求过（检查起点）
+	loginfo, ok := kv.mapseqreqqed[seq]
+	if ok == false {
+		return false //没有请求过
+	} else {
+		//有请求过，检查其分配的索引是否已经提交了日志
+		log, ok := kv.logs[loginfo.Index]
+		if ok {
+			//提交了别的seq的日志
+			if log.Seq != seq {
+				return false
+			}
+		}
+
+		//分配的索引超过了raft目前的日志索引，说明是一个已经失效的日志
+		if loginfo.Index > kv.rf.CurrentIndex() {
+			return false //失效的日志，可以继续提交
+		}
+	}
+
+	kv.DPrintf("[PutAppend] checkDupReq....seq:%v is duplicated", seq)
+	return true
+}
+
+//记录PutAppend请求
+func (kv *RaftKV) recodeReq(args *PutAppendArgs, index int) {
+	loginfo, ok := kv.mapseqreqqed[args.Seq]
+	if ok == false {
+		loginfo = ReqLogInfo{}
+	}
+
+	loginfo.Index = index
+	loginfo.Server = kv.me
+
+	kv.mapseqreqqed[args.Seq] = loginfo
+	return
+}
+
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 
@@ -98,26 +147,26 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.Seq = args.Seq
 	reply.Server = kv.me
 
-	//检查seq是否提交过
-	_, ok := kv.mapseq[args.Seq]
-	if ok {
-		kv.DPrintf("[PutAppend] Receive req...But seq:%v has existed...", args.Seq)
-		reply.Err = "Err: Seq has duplicated.."
-	}
-
-	value := Op{args.Key, args.Value, args.Op, args.Seq, kv.me}
-
-	kv.DPrintf("[PutAppend] Receive req... args:%v, key:%s, value:%s, Op:%v, seq:%v", args, args.Key, args.Value, value, args.Seq)
-
-	index, term, isLeader := kv.rf.Start(value)
-
-	if isLeader == false {
+	if kv.rf.IsLeader() == false {
 		reply.WrongLeader = true
 		prefix := "I'm not Leader. server: "
 		reply.Err = Err(prefix + strconv.Itoa(kv.me))
 		kv.DPrintf("[PutAppend], Not Leader. args:%v", args)
 		return
 	}
+
+	//检查具有[seq]请求是否需要再次提交
+	dup := kv.checkDupReq(args.Seq)
+	if dup {
+		reply.Err = "Err: Seq has duplicated.."
+		return
+	}
+
+	value := Op{args.Key, args.Value, args.Op, args.Seq, kv.me}
+
+	kv.DPrintf("[PutAppend] Receive req... args:%v, key:%s, value:%s, Op:%v, seq:%v", args, args.Key, args.Value, value, args.Seq)
+
+	index, term, _ := kv.rf.Start(value)
 
 	kv.DPrintf("[PutAppend] theleader start to process req")
 
@@ -127,8 +176,11 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	//记录请求
+	kv.recodeReq(args, index)
+
 	//监听index对应的channel，以确定log是否提交
-	_, ok = kv.mapch[index]
+	_, ok := kv.mapch[index]
 	if ok == false {
 		kv.mapch[index] = make(chan int, 1)
 	}
@@ -226,14 +278,14 @@ func (kv *RaftKV) applyLog(m raft.ApplyMsg, v Op) string {
 	kv.mapch[m.Index] <- 1
 
 	//检查提交的日志是否已经提交过
-	_, ok = kv.mapseq[v.Seq]
+	_, ok = kv.mapseqcommited[v.Seq]
 	if ok == true {
 		//已经提交过
 		err_msg = fmt.Sprintf("server %v apply seq:%v has commited.prev commit server:%v index:%v, now commit server:%v index:%v, OP:%v",
-			kv.me, v.Seq, kv.mapseq[v.Seq].Server, kv.mapseq[v.Seq].Index, v.Server, m.Index, v)
+			kv.me, v.Seq, kv.mapseqcommited[v.Seq].Server, kv.mapseqcommited[v.Seq].Index, v.Server, m.Index, v)
 	}
 	loginfo := ReqLogInfo{Server: v.Server, Index: m.Index}
-	kv.mapseq[v.Seq] = loginfo
+	kv.mapseqcommited[v.Seq] = loginfo
 
 	return err_msg
 }
@@ -269,7 +321,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.logs = make(map[int]Op)
 	kv.maplog = make(map[string]string)
 	kv.mapch = make(map[int]chan int)
-	kv.mapseq = make(map[uint64]ReqLogInfo)
+
+	kv.mapseqcommited = make(map[uint64]ReqLogInfo)
+	kv.mapseqreqqed = make(map[uint64]ReqLogInfo)
 
 	// You may need initialization code here.
 	go func(me int) {

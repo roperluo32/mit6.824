@@ -881,6 +881,10 @@ func (rf *Raft) IsLeader() bool {
 	return rf.state == Leader
 }
 
+func (rf *Raft) CurrentIndex() int {
+	return rf.logIndex
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
