@@ -137,6 +137,7 @@ func (kv *RaftKV) recodeReq(args *PutAppendArgs, index int) {
 	loginfo.Server = kv.me
 
 	kv.mapseqreqqed[args.Seq] = loginfo
+
 	return
 }
 
@@ -158,7 +159,9 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	//检查具有[seq]请求是否需要再次提交
 	dup := kv.checkDupReq(args.Seq)
 	if dup {
-		reply.Err = "Err: Seq has duplicated.."
+		//按照提交成功的返回值来返回
+		reply.Err = "" //"Err: Seq has duplicated.."
+		reply.WrongLeader = false
 		return
 	}
 
@@ -168,7 +171,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	index, term, _ := kv.rf.Start(value)
 
-	kv.DPrintf("[PutAppend] theleader start to process req")
+	kv.DPrintf("[PutAppend] theleader start to process req:%v", args.Seq)
 
 	if index < 0 || term < 0 {
 		reply.Err = "Add log to raft fail."
@@ -176,6 +179,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	kv.mu.Lock()
 	//记录请求
 	kv.recodeReq(args, index)
 
@@ -185,6 +189,8 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mapch[index] = make(chan int, 1)
 	}
 	notifych := kv.mapch[index]
+
+	kv.mu.Unlock()
 
 	//轮询检查
 	for {
@@ -255,6 +261,8 @@ func (kv *RaftKV) applyLog(m raft.ApplyMsg, v Op) string {
 
 	//将提交的日志的值保存到数据库中，目前用map来保存
 	kv.logs[m.Index] = v
+
+	kv.DPrintf("[applyLog], commited logs:%v", kv.logs)
 
 	switch v.Op {
 	case "Put":
