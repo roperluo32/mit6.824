@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -75,7 +75,74 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	kv.DPrintf("[Get] theleader start to process req")
+	kv.DPrintf("[Get] theleader start to process req:%v", args.Seq)
+
+	//检查具有[seq]请求是否需要再次提交
+	dup := kv.checkDupReq(args.Seq)
+	if dup {
+		//按照提交成功的返回值来返回
+		reply.Err = "" //"Err: Seq has duplicated.."
+		reply.WrongLeader = false
+
+		v, ok := kv.maplog[args.Key]
+		//key不存在或者还没有提交
+		if ok == false {
+			reply.Err = "Key is not exist."
+			kv.DPrintf("[Get], Key is not exist. args:%v", args)
+			return
+		}
+
+		reply.Value = v
+		return
+	}
+
+	value := Op{Key: args.Key, Op: "Get", Seq: args.Seq, Server: kv.me}
+
+	index, term, _ := kv.rf.Start(value)
+
+	if index < 0 || term < 0 {
+		reply.Err = "Add log to raft fail."
+		kv.DPrintf("[Get] Add log to raft fail. index:%v, term:%v, args:%v", index, term, args)
+		return
+	}
+
+	kv.mu.Lock()
+	//记录请求
+	kv.recodeReq(args.Seq, index)
+
+	//监听index对应的channel，以确定log是否提交
+	_, ok := kv.mapch[index]
+	if ok == false {
+		kv.mapch[index] = make(chan int, 1)
+	}
+	notifych := kv.mapch[index]
+
+	kv.mu.Unlock()
+
+	//轮询检查
+	for {
+		time.Sleep(20 * time.Millisecond)
+
+		//日志已经提交
+		if len(notifych) > 0 {
+			_ = <-notifych
+
+			reply.Err = ""
+			reply.WrongLeader = false
+
+			kv.DPrintf("[Get] req commit ok. index:%v, term:%v. reply:%v", index, term, reply)
+			break
+		}
+
+		//leader关系检查
+		t, leader := kv.rf.GetState()
+		if t != term || leader == false {
+			reply.Err = "I'm not Leader when commit log"
+			kv.DPrintf("[Get], I'm not Leader when commit log. index:%v, term:%v", index, term)
+			reply.WrongLeader = true
+			return
+		}
+	}
 
 	v, ok := kv.maplog[args.Key]
 	//key不存在或者还没有提交
@@ -98,7 +165,7 @@ func (kv *RaftKV) checkDupReq(seq uint64) bool {
 	//1，是否已经提交过了（检查终点）
 	_, ok := kv.mapseqcommited[seq]
 	if ok {
-		kv.DPrintf("[PutAppend] checkDupReq....But seq:%v has commited...", seq)
+		kv.DPrintf("[checkDupReq] seq:%v has commited...", seq)
 		return true
 	}
 
@@ -122,13 +189,13 @@ func (kv *RaftKV) checkDupReq(seq uint64) bool {
 		}
 	}
 
-	kv.DPrintf("[PutAppend] checkDupReq....seq:%v is duplicated", seq)
+	kv.DPrintf("[checkDupReq] seq:%v is duplicated", seq)
 	return true
 }
 
 //记录PutAppend请求
-func (kv *RaftKV) recodeReq(args *PutAppendArgs, index int) {
-	loginfo, ok := kv.mapseqreqqed[args.Seq]
+func (kv *RaftKV) recodeReq(seq uint64, index int) {
+	loginfo, ok := kv.mapseqreqqed[seq]
 	if ok == false {
 		loginfo = ReqLogInfo{}
 	}
@@ -136,7 +203,7 @@ func (kv *RaftKV) recodeReq(args *PutAppendArgs, index int) {
 	loginfo.Index = index
 	loginfo.Server = kv.me
 
-	kv.mapseqreqqed[args.Seq] = loginfo
+	kv.mapseqreqqed[seq] = loginfo
 
 	return
 }
@@ -181,7 +248,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	kv.mu.Lock()
 	//记录请求
-	kv.recodeReq(args, index)
+	kv.recodeReq(args.Seq, index)
 
 	//监听index对应的channel，以确定log是否提交
 	_, ok := kv.mapch[index]
@@ -276,6 +343,8 @@ func (kv *RaftKV) applyLog(m raft.ApplyMsg, v Op) string {
 			//key对应的值不存在，那么就直接赋值
 			kv.maplog[v.Key] = v.Value
 		}
+	default:
+		break
 	}
 
 	//向监听index对应的channel中放入1，以通知Get日志已经提交
