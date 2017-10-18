@@ -81,7 +81,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	//检查具有[seq]请求是否需要再次提交
 	dup := kv.checkDupReq(value)
-	if dup {
+	if dup == 1 {
 		//按照提交成功的返回值来返回
 		reply.Err = "" //"Err: Seq has duplicated.."
 		reply.WrongLeader = false
@@ -160,44 +160,60 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 }
 
 func checkOpEqual(value1 interface{}, value2 interface{}) bool {
+	v1, ok := value1.(Op)
+	if ok == false {
+		return false
+	}
 
+	v2, ok := value2.(Op)
+	if ok == false {
+		return false
+	}
+
+	if v1.Seq == v2.Seq {
+		return true
+	}
 	return false
 }
 
 //1,返回true，说明是重复日志，丢弃
 //2， 返回false，说明没有提交过或者提交过但是已经失效了，可以继续提交
-func (kv *RaftKV) checkDupReq(op Op) bool {
+//返回值说明：
+//	0:	没有提交过的请求
+//	1:	已经提交的重复请求
+//	2:	在raft但是尚未提交的请求
+func (kv *RaftKV) checkDupReq(op Op) int {
 	seq := op.Seq
 	//1，是否已经提交过了（检查终点）
 	_, ok := kv.mapseqcommited[seq]
 	if ok {
 		kv.DPrintf("[checkDupReq] seq:%v has commited...", seq)
-		return true
+		return 1
 	}
 
 	//2,是否有请求过（检查起点）
 	loginfo, ok := kv.mapseqreqqed[seq]
 	if ok == false {
-		dup := kv.rf.CheckInNotCommitLog(op)
-		return dup //没有请求过
+		dup := kv.rf.CheckInNotCommitLog(op, checkOpEqual)
+		return 2 //没有请求过
 	} else {
 		//有请求过，检查其分配的索引是否已经提交了日志
 		log, ok := kv.logs[loginfo.Index]
 		if ok {
 			//提交了别的seq的日志
 			if log.Seq != seq {
-				return false
+				return 0
 			}
 		}
 
 		//分配的索引超过了raft目前的日志索引，说明是一个已经失效的日志
 		if loginfo.Index > kv.rf.CurrentIndex() {
-			return false //失效的日志，可以继续提交
+			return 0 //失效的日志，可以继续提交
 		}
 	}
 
 	kv.DPrintf("[checkDupReq] seq:%v is duplicated", seq)
-	return true
+	return 1
 }
 
 //记录PutAppend请求
@@ -234,7 +250,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	//检查具有[seq]请求是否需要再次提交
 	dup := kv.checkDupReq(value)
-	if dup {
+	if dup != 0 {
 		//按照提交成功的返回值来返回
 		reply.Err = "" //"Err: Seq has duplicated.."
 		reply.WrongLeader = false

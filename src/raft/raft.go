@@ -885,11 +885,13 @@ func (rf *Raft) CurrentIndex() int {
 	return rf.logIndex
 }
 
+type CompareFunc func(v1 interface{}, v2 interface{}) bool
+
 //检查一个值是否在raft的没有提交的日志里面
-func (rf *Raft) CheckInNotCommitLog(cmd interface{}) bool {
+func (rf *Raft) CheckInNotCommitLog(cmd interface{}, cmpfunc CompareFunc) bool {
 
 	for i := rf.commitIndex; i < rf.logIndex; i++ {
-		if rf.log[i].Value == cmd {
+		if cmpfunc(rf.log[i].Value, cmd) {
 			return true
 		}
 	}
