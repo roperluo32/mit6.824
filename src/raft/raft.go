@@ -104,6 +104,7 @@ type RaftPersist struct {
 	VoteFor     int
 	Log         [10000]logEntry
 	LogIndex    int
+	CommitIndex int
 }
 
 //添加日志/心跳包结构体
@@ -154,6 +155,7 @@ func (rf *Raft) persist() {
 	var p RaftPersist
 	p.CurrentTerm = rf.currentTerm
 	p.VoteFor = rf.voteFor
+	p.CommitIndex = rf.commitIndex
 	for i := 0; i < rf.logIndex; i++ {
 		p.Log[i] = rf.log[i]
 	}
@@ -188,6 +190,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	rf.currentTerm = p.CurrentTerm
 	rf.voteFor = p.VoteFor
+	rf.commitIndex = p.CommitIndex
 
 	rf.DPrintf("raft:%v read persist:%v", rf.me, p)
 
@@ -461,7 +464,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *Append
 		//更新已经和server匹配的日志索引
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 
-		rf.DPrintf("raft %v send log to raft %v success. myindex:%v, nextindex:%v", rf.me, server, rf.logIndex, rf.nextIndex)
+		rf.DPrintf("raft %v send log to raft %v success. myindex:%v, nextindex:%v, matchindex:%v", rf.me, server, rf.logIndex, rf.nextIndex, rf.matchIndex)
 	}
 
 	return ok
@@ -890,7 +893,11 @@ type CompareFunc func(v1 interface{}, v2 interface{}) bool
 //检查一个值是否在raft的没有提交的日志里面
 func (rf *Raft) CheckInNotCommitLog(cmd interface{}, cmpfunc CompareFunc) bool {
 
-	for i := rf.commitIndex; i < rf.logIndex; i++ {
+	if len(rf.log) <= 0 {
+		return false
+	}
+
+	for i := rf.lastApplied + 1; i < rf.logIndex; i++ {
 		if cmpfunc(rf.log[i].Value, cmd) {
 			return true
 		}

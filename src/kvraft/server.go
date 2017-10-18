@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -81,20 +81,23 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	//检查具有[seq]请求是否需要再次提交
 	dup := kv.checkDupReq(value)
-	if dup == 1 {
+	if dup {
 		//按照提交成功的返回值来返回
 		reply.Err = "" //"Err: Seq has duplicated.."
 		reply.WrongLeader = false
 
+		kv.DPrintf("[Get] Duplicated get req. args:%v", args)
+
 		v, ok := kv.maplog[args.Key]
 		//key不存在或者还没有提交
 		if ok == false {
-			reply.Err = "Key is not exist."
+			reply.Value = ""
 			kv.DPrintf("[Get], Key is not exist. args:%v", args)
-			return
+		} else {
+			reply.Value = v
 		}
 
-		reply.Value = v
+		reply.Err = ""
 		return
 	}
 
@@ -147,12 +150,13 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	v, ok := kv.maplog[args.Key]
 	//key不存在或者还没有提交
 	if ok == false {
-		reply.Err = "Key is not exist."
+		reply.Value = ""
 		kv.DPrintf("[Get], Key is not exist. args:%v", args)
 		return
+	} else {
+		reply.Value = v
 	}
 
-	reply.Value = v
 	reply.Err = ""
 
 	kv.DPrintf("[Get], Get Success. args:%v, reply:%v", args, reply)
@@ -182,38 +186,38 @@ func checkOpEqual(value1 interface{}, value2 interface{}) bool {
 //	0:	没有提交过的请求
 //	1:	已经提交的重复请求
 //	2:	在raft但是尚未提交的请求
-func (kv *RaftKV) checkDupReq(op Op) int {
+func (kv *RaftKV) checkDupReq(op Op) bool {
 	seq := op.Seq
 	//1，是否已经提交过了（检查终点）
 	_, ok := kv.mapseqcommited[seq]
 	if ok {
 		kv.DPrintf("[checkDupReq] seq:%v has commited...", seq)
-		return 1
+		return true
 	}
 
 	//2,是否有请求过（检查起点）
 	loginfo, ok := kv.mapseqreqqed[seq]
 	if ok == false {
 		dup := kv.rf.CheckInNotCommitLog(op, checkOpEqual)
-		return 2 //没有请求过
+		return dup //没有请求过
 	} else {
 		//有请求过，检查其分配的索引是否已经提交了日志
 		log, ok := kv.logs[loginfo.Index]
 		if ok {
 			//提交了别的seq的日志
 			if log.Seq != seq {
-				return 0
+				return false
 			}
 		}
 
 		//分配的索引超过了raft目前的日志索引，说明是一个已经失效的日志
 		if loginfo.Index > kv.rf.CurrentIndex() {
-			return 0 //失效的日志，可以继续提交
+			return false //失效的日志，可以继续提交
 		}
 	}
 
 	kv.DPrintf("[checkDupReq] seq:%v is duplicated", seq)
-	return 1
+	return true
 }
 
 //记录PutAppend请求
@@ -250,7 +254,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	//检查具有[seq]请求是否需要再次提交
 	dup := kv.checkDupReq(value)
-	if dup != 0 {
+	if dup {
 		//按照提交成功的返回值来返回
 		reply.Err = "" //"Err: Seq has duplicated.."
 		reply.WrongLeader = false
