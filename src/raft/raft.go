@@ -885,6 +885,18 @@ func (rf *Raft) CurrentIndex() int {
 	return rf.logIndex
 }
 
+//检查一个值是否在raft的没有提交的日志里面
+func (rf *Raft) CheckInNotCommitLog(cmd interface{}) bool {
+
+	for i := rf.commitIndex; i < rf.logIndex; i++ {
+		if rf.log[i].Value == cmd {
+			return true
+		}
+	}
+
+	return false
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
